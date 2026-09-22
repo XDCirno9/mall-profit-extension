@@ -13,23 +13,3 @@
 5. 打开或刷新商城页面。
 
 详细使用说明见 [`mall-profit-extension/README.md`](mall-profit-extension/README.md)。
-
-## 目录
-
-- `mall-profit-extension/`：扩展源码。
-- `mall-profit-extension.zip`：可直接分发或放入 GitHub Release 的打包文件。
-- `tools/e2e/`：可选的验证脚本（jsdom 无头测试 + 真实浏览器注入测试），不参与打包。
-
-## 开发与验证
-
-扩展本身没有运行时依赖，也不需要构建步骤。
-
-```bash
-# 核心算法测试
-node mall-profit-extension/tests/profit-core.test.js
-
-# 跳转与港口管理器的无头验证（需要 jsdom）
-node tools/e2e/jsdom-harness.js
-```
-
-真实浏览器验证（需要 `agent-browser`）的做法见 [`tools/e2e/README.md`](tools/e2e/README.md)。

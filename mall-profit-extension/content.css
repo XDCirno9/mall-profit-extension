@@ -30,7 +30,7 @@
   position: fixed;
   right: 18px;
   bottom: 18px;
-  z-index: 2147483646;
+  z-index: 2147482000;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -81,7 +81,7 @@
 .mpe-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 2147483646;
+  z-index: 2147482000;
   background: rgba(24, 30, 25, 0.32);
   backdrop-filter: blur(2px);
 }
@@ -91,7 +91,7 @@
   top: 12px;
   right: 12px;
   bottom: 12px;
-  z-index: 2147483647;
+  z-index: 2147482100;
   display: flex;
   width: min(1120px, calc(100vw - 24px));
   min-width: 0;
@@ -575,111 +575,14 @@
   font-weight: 750;
 }
 
-.mpe-footer-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-}
-
-.mpe-footer-toggle input {
-  margin: 0;
-  cursor: pointer;
-  accent-color: #bd8b28;
-}
-
-/* 并排模式：跳转后保留面板，同时让商城自己的物品详情模态框让出右侧空间，
-   避免面板把详情整个盖住。只作用于 body 直属的商城弹层，且仅在中宽以上生效
-   （窄窗口左右并排没有意义，此时插件会退回「跳转即关闭面板」）。 */
-@media (min-width: 900px) {
-  html.mpe-dock {
-    --mpe-dock-width: 472px;
-  }
-
-  .mpe-panel[data-dock="true"] {
-    width: 460px;
-  }
-
-  /* 460px 的窄栏里，头部按原尺寸会把标题挤成竖排，工具栏也会拉成一长条，这里统一收紧 */
-  .mpe-panel[data-dock="true"] .mpe-header {
-    gap: 10px;
-    padding: 10px 12px;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-heading {
-    gap: 8px;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-heading-mark {
-    width: 28px;
-    height: 28px;
-    box-shadow: 2px 2px 0 rgba(52, 61, 53, 0.18);
-    font-size: 14px;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-heading h2 {
-    font-size: 14px;
-    letter-spacing: 0;
-    white-space: nowrap;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-heading p {
-    display: none;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-header-actions {
-    gap: 6px;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-button {
-    min-height: 30px;
-    padding: 0 8px;
-    font-size: 12px;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-icon-button {
-    width: 30px;
-    height: 30px;
-    font-size: 18px;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-toolbar {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-    padding: 10px 12px;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-toolbar .mpe-segmented,
-  .mpe-panel[data-dock="true"] .mpe-toolbar .mpe-button {
-    grid-column: span 2;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-field select,
-  .mpe-panel[data-dock="true"] .mpe-field input,
-  .mpe-panel[data-dock="true"] .mpe-quantity-field input {
-    width: 100%;
-    min-width: 0;
-    height: 32px;
-    font-size: 12px;
-  }
-
-  .mpe-panel[data-dock="true"] .mpe-status-line,
-  .mpe-panel[data-dock="true"] .mpe-explainer,
-  .mpe-panel[data-dock="true"] .mpe-summary,
-  .mpe-panel[data-dock="true"] .mpe-footer {
-    padding-left: 12px;
-    padding-right: 12px;
-  }
-
-  html.mpe-dock body > [data-slot="dialog-content"],
-  html.mpe-dock body > [role="dialog"]:not([id^="mpe-"]) {
-    left: calc((100vw - var(--mpe-dock-width)) / 2) !important;
-    width: calc(100vw - var(--mpe-dock-width) - 2rem) !important;
-    max-width: calc(100vw - var(--mpe-dock-width) - 2rem) !important;
-  }
+/* 商城的物品详情是 body 直属的模态弹层（遮罩 + 对话框），原生层级只是 Tailwind 的 z-50，
+   远低于插件的 2.1e9 档，因此默认会被利润面板整个盖住。这里把这一对弹层抬到面板之上，
+   让详情直接盖在面板上层显示：面板不会被关闭也不会被收窄，关掉详情后原样回到排行。
+   只作用于 body 直属节点，插件自己的浮层都在 #mpe-root 内，不受影响。 */
+body > [data-slot="dialog-overlay"],
+body > [data-slot="dialog-content"],
+body > [role="dialog"]:not([id^="mpe-"]) {
+  z-index: 2147483000 !important;
 }
 
 .mpe-panel-open {
@@ -757,7 +660,7 @@
 .mpe-manager {
   position: fixed;
   inset: 0;
-  z-index: 2147483648;
+  z-index: 2147483500;
   display: grid;
   place-items: center;
   padding: 18px;

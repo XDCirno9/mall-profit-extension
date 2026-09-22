@@ -162,10 +162,10 @@
       if (document.querySelectorAll('.mpe-jump-target').length > 0) highlightSeen = true;
     }, 25);
 
-    // 跳转后要么进入并排模式（默认），要么在窄窗口 / 用户关掉开关时关闭面板
+    // 跳转后面板既不关闭也不收窄，商城的物品详情会弹在面板之上
     return waitFor(function () {
       var p = document.getElementById('mpe-panel');
-      return p && (p.dataset.dock === 'true' || p.dataset.open === 'false');
+      return p && p.dataset.open === 'true' && !!document.querySelector('body > [data-slot="dialog-content"], body > [role="dialog"]:not([id^="mpe-"])');
     }, 25000, 50).then(function (settled) {
       R.panelSettled = !!settled;
       R.highlightSeenDuringJump = highlightSeen;
@@ -176,7 +176,7 @@
     if (R.phase !== 'running') return null;
     R.highlightSeenAfter = document.querySelectorAll('.mpe-jump-target').length > 0;
     R.panelOpenAfter = document.getElementById('mpe-panel').dataset.open;
-    R.panelDockAfter = document.getElementById('mpe-panel').dataset.dock;
+    R.dockAttrAfter = document.getElementById('mpe-panel').dataset.dock === undefined ? null : document.getElementById('mpe-panel').dataset.dock;
     R.htmlDockAfter = document.documentElement.classList.contains('mpe-dock');
     R.backdropHiddenAfter = document.getElementById('mpe-backdrop').hidden;
     var dlg = document.querySelector('body > [data-slot="dialog-content"], body > [role="dialog"]:not([id^="mpe-"])');

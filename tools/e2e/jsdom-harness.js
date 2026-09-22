@@ -14,6 +14,7 @@ const EXT_DIR = path.resolve(__dirname, '..', '..', 'mall-profit-extension');
 
 const PROFIT_CORE = fs.readFileSync(path.join(EXT_DIR, 'profit-core.js'), 'utf8');
 const CONTENT_JS = fs.readFileSync(path.join(EXT_DIR, 'content.js'), 'utf8');
+const CONTENT_CSS = fs.readFileSync(path.join(EXT_DIR, 'content.css'), 'utf8');
 
 const ITEMS = [
   { itemName: '石头', minSellPrice: 1, maxBuyPrice: 2.5, sellAmount: 111610, sellOfferCount: 76, buyOfferCount: 56, totalOfferCount: 132, vanillaId: null },
@@ -96,7 +97,7 @@ function buildMallDom(dom, initialItems) {
   let dialog = null;
 
   // 真实的商城详情是挂在 body 下的模态框（data-slot="dialog-content"），照样复刻，
-  // 用来验证并排模式下插件不去压暗/锁住商城，以及 Esc 该归谁
+  // 用来验证跳转后面板不会被关掉，以及 Esc 该归谁
   function ensureDialog() {
     if (dialog) return dialog;
     dialog = document.createElement('div');
@@ -262,17 +263,31 @@ function statusNote(dom) {
   return dom.window.document.getElementById('mpe-status-note').textContent;
 }
 
-function dockState(dom) {
+// 跳转后的面板状态。dockAttr/htmlDock/undockButton 用来确认 v1.7.0 的并排收窄已经彻底移除
+function panelState(dom) {
   const document = dom.window.document;
   return {
     open: panelOpen(dom),
-    dock: document.getElementById('mpe-panel').dataset.dock,
+    dockAttr: document.getElementById('mpe-panel').dataset.dock,
     htmlDock: document.documentElement.classList.contains('mpe-dock'),
+    undockButton: Boolean(document.getElementById('mpe-undock')),
+    keepPanelToggle: Boolean(document.getElementById('mpe-keep-panel')),
     backdropHidden: document.getElementById('mpe-backdrop').hidden,
-    undockHidden: document.getElementById('mpe-undock').hidden,
     scrollLocked: document.documentElement.classList.contains('mpe-panel-open'),
-    keepPanelChecked: document.getElementById('mpe-keep-panel').checked
+    mallDialogOpen: Boolean(document.querySelector('body > [data-slot="dialog-content"]'))
   };
+}
+
+// 从 CSS 文本里取出某个选择器块里声明的 z-index 数值
+function cssZIndex(selector) {
+  const start = CONTENT_CSS.indexOf(selector);
+  assert.ok(start >= 0, `content.css 里应存在规则 ${selector}`);
+  const open = CONTENT_CSS.indexOf('{', start);
+  const close = CONTENT_CSS.indexOf('}', open);
+  const block = CONTENT_CSS.slice(open, close);
+  const found = /z-index:\s*([0-9]+)/.exec(block);
+  assert.ok(found, `${selector} 应声明 z-index`);
+  return Number(found[1]);
 }
 
 function clickItemName(dom, itemName) {
@@ -304,14 +319,18 @@ async function scenarioFastPath() {
   record('快路径：不修改商城搜索框',
     mall.search.value === '' && mall.searchHistory.length === 0,
     `search="${mall.search.value}" history=${JSON.stringify(mall.searchHistory)}`);
-  const dock = dockState(dom);
+  const state = panelState(dom);
   record('快路径：跳转后面板保持打开，不再自动关闭',
-    dock.open === true && dock.dock === 'true', JSON.stringify(dock));
-  record('快路径：进入并排模式，并给商城模态框腾出右侧空间',
-    dock.htmlDock === true, JSON.stringify(dock));
-  record('快路径：并排模式下不再用遮罩压暗商城、也不锁页面滚动',
-    dock.backdropHidden === true && dock.scrollLocked === false, JSON.stringify(dock));
-  record('快路径：头部出现「展开面板」按钮', dock.undockHidden === false, JSON.stringify(dock));
+    state.open === true, JSON.stringify(state));
+  record('快路径：跳转不再收窄面板（并排残留已清除）',
+    state.dockAttr === undefined && state.htmlDock === false && state.undockButton === false,
+    JSON.stringify(state));
+  record('快路径：面板自己的遮罩与页面滚动锁保持原样',
+    state.backdropHidden === false && state.scrollLocked === true, JSON.stringify(state));
+  record('快路径：页脚的「跳转后保留面板」开关已移除',
+    state.keepPanelToggle === false, JSON.stringify(state));
+  record('快路径：商城的物品详情仍挂在 body 下（供 CSS 抬到面板之上）',
+    state.mallDialogOpen === true, JSON.stringify(state));
   record('快路径：状态栏说明面板保持打开',
     statusNote(dom).includes('面板保持打开'), statusNote(dom));
   record('快路径：商城详情显示该物品',
@@ -333,8 +352,8 @@ async function scenarioSearchPath() {
     mall.clickedNames.includes('钻石'), `clicked=${JSON.stringify(mall.clickedNames)}`);
   record('搜索路径：搜索框保留物品名便于继续查看',
     mall.search.value === '钻石', `search="${mall.search.value}"`);
-  record('搜索路径：跳转后面板同样保持打开（并排模式）',
-    panelOpen(dom) === true && dockState(dom).dock === 'true', JSON.stringify(dockState(dom)));
+  record('搜索路径：跳转后面板同样保持打开',
+    panelOpen(dom) === true, JSON.stringify(panelState(dom)));
   dom.window.close();
 }
 
@@ -398,8 +417,8 @@ async function scenarioRootPathAlsoWorks() {
 
   record('回归：从根路径 `/` 进入商城也能跳转',
     mall.clickedNames.includes('石头'), `clicked=${JSON.stringify(mall.clickedNames)}`);
-  record('回归：根路径跳转后面板保持打开（并排模式）',
-    panelOpen(dom) === true && dockState(dom).dock === 'true', JSON.stringify(dockState(dom)));
+  record('回归：根路径跳转后面板保持打开',
+    panelOpen(dom) === true, JSON.stringify(panelState(dom)));
   record('回归：根路径跳转不报错', errorText(dom) === '', errorText(dom));
   record('回归：根路径跳转不碰搜索框',
     mall.search.value === '' && mall.searchHistory.length === 0,
@@ -474,53 +493,56 @@ async function scenarioManualCalculationStillManual() {
   dom.window.close();
 }
 
-// 并排模式可以随时退出：点「展开面板」回到原来的全屏浮层
-async function scenarioUndockRestoresPanel() {
+// 核心诉求：跳转后不再收窄面板，而是让商城的物品详情显示在面板之上。
+// jsdom 不做层叠计算，所以这里把「CSS 层级声明」和「DOM 行为」分开断言。
+async function scenarioMallDialogStacksAbovePanel() {
+  const panelZ = cssZIndex('.mpe-panel {');
+  const backdropZ = cssZIndex('.mpe-backdrop {');
+  const launcherZ = cssZIndex('.mpe-launcher {');
+  const mallDialogZ = cssZIndex('body > [data-slot="dialog-content"]');
+
+  record('层级：商城物品详情的层级高于利润面板',
+    mallDialogZ > panelZ, `mallDialog=${mallDialogZ} panel=${panelZ}`);
+  record('层级：面板仍高于插件自己的遮罩与启动按钮',
+    panelZ > backdropZ && backdropZ === launcherZ,
+    `panel=${panelZ} backdrop=${backdropZ} launcher=${launcherZ}`);
+
+  const ruleStart = CONTENT_CSS.indexOf('body > [data-slot="dialog-overlay"]');
+  const ruleEnd = CONTENT_CSS.indexOf('}', ruleStart);
+  const selectors = CONTENT_CSS.slice(ruleStart, ruleEnd)
+    .split('{')[0].trim().split(',').map((selector) => selector.trim());
+  record('层级：抬升规则只作用于 body 直属的商城弹层',
+    selectors.length === 3 && selectors.every((selector) => selector.startsWith('body > ')),
+    selectors.join(' | '));
+
   const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
   const mall = buildMallDom(dom, ITEMS);
   await openPanelAndLoad(dom);
 
   clickItemName(dom, '石头');
-  await waitFor(() => dockState(dom).dock === 'true', '进入并排模式', 4000);
+  await waitFor(() => Boolean(mall.dialog), '商城详情弹出', 4000);
 
-  dom.window.document.getElementById('mpe-undock').click();
-  await sleep(60);
-
-  const dock = dockState(dom);
-  record('并排退出：点「展开面板」后回到浮层模式',
-    dock.open === true && dock.dock === 'false' && dock.htmlDock === false, JSON.stringify(dock));
-  record('并排退出：恢复遮罩与页面滚动锁',
-    dock.backdropHidden === false && dock.scrollLocked === true, JSON.stringify(dock));
-  record('并排退出：商城详情仍开着，不被插件关掉', Boolean(mall.dialog), `dialog=${Boolean(mall.dialog)}`);
+  const state = panelState(dom);
+  record('叠层：跳转后商城详情弹出，面板既不关闭也不收窄',
+    state.open === true && state.mallDialogOpen === true && state.dockAttr === undefined,
+    JSON.stringify(state));
+  record('叠层：插件不去挪动商城弹层（交给 CSS 层级处理）',
+    mall.dialog.style.left === '' && mall.dialog.style.width === '',
+    `left="${mall.dialog.style.left}" width="${mall.dialog.style.width}"`);
   dom.window.close();
 }
 
-// 页脚的开关可以让整个行为退回「跳转即关闭面板」
-async function scenarioKeepPanelDisabledClosesPanel() {
-  const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
-  buildMallDom(dom, ITEMS);
-  await openPanelAndLoad(dom);
-
-  const toggle = dom.window.document.getElementById('mpe-keep-panel');
-  toggle.checked = false;
-  toggle.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-  await sleep(40);
-
-  record('可关闭：取消勾选本身不会收起面板', panelOpen(dom) === true);
-
-  clickItemName(dom, '石头');
-  await sleep(200);
-
-  record('可关闭：关掉选项后跳转回到「自动关闭面板」的老行为',
-    panelOpen(dom) === false, JSON.stringify(dockState(dom)));
-  record('可关闭：勾选状态写入本地存储',
-    Boolean(dom.__store['mallProfit.prefs.v1']) && dom.__store['mallProfit.prefs.v1'].keepPanelOnJump === false,
-    JSON.stringify(dom.__store['mallProfit.prefs.v1']));
-  dom.window.close();
+// 源码里不应再残留并排收窄那一套
+function scenarioNoDockLeftovers() {
+  record('清理：content.js 不再包含并排收窄与界面偏好逻辑',
+    !/mpe-undock|mpe-keep-panel|keepPanelOnJump|panelDocked|canDockPanel|minDockWidth|mpe-dock/.test(CONTENT_JS),
+    '相关关键字全部消失');
+  record('清理：content.css 不再包含并排样式',
+    !/mpe-dock|data-dock|footer-toggle/.test(CONTENT_CSS), '相关关键字全部消失');
 }
 
-// 窄窗口左右并排没有意义，应退回「跳转即关闭面板」
-async function scenarioNarrowWindowClosesPanel() {
+// v1.7.0 里窄窗口会退回「跳转即关闭面板」，现在不再有收窄这回事，窄窗口也保持打开
+async function scenarioNarrowWindowKeepsPanel() {
   const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
   buildMallDom(dom, ITEMS);
   await openPanelAndLoad(dom);
@@ -530,19 +552,19 @@ async function scenarioNarrowWindowClosesPanel() {
   clickItemName(dom, '石头');
   await sleep(200);
 
-  record('窄窗口：视口不足 900px 时退回「跳转即关闭面板」',
-    panelOpen(dom) === false, JSON.stringify(dockState(dom)));
+  record('窄窗口：视口不足 900px 时面板同样保持打开',
+    panelOpen(dom) === true, JSON.stringify(panelState(dom)));
   dom.window.close();
 }
 
-// Esc 冲突：并排模式下商城的详情也开着，Esc 该关详情而不是连面板一起关
+// Esc 冲突：商城的详情盖在面板之上时，Esc 该关详情而不是连面板一起关
 async function scenarioEscapeBelongsToMallDialog() {
   const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
   const mall = buildMallDom(dom, ITEMS);
   await openPanelAndLoad(dom);
 
   clickItemName(dom, '石头');
-  await waitFor(() => dockState(dom).dock === 'true', '进入并排模式', 4000);
+  await waitFor(() => Boolean(mall.dialog), '商城详情弹出', 4000);
 
   const press = () => dom.window.document.dispatchEvent(
     new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
@@ -551,22 +573,22 @@ async function scenarioEscapeBelongsToMallDialog() {
   press();
   await sleep(60);
   record('Esc 归属：商城详情开着时按 Esc 不会连带关掉利润面板',
-    panelOpen(dom) === true && dockState(dom).dock === 'true', JSON.stringify(dockState(dom)));
+    panelOpen(dom) === true, JSON.stringify(panelState(dom)));
 
   mall.closeDialog();
   press();
   await sleep(60);
-  record('Esc 归属：详情关掉后 Esc 正常关闭面板并解除并排状态',
-    panelOpen(dom) === false && dockState(dom).htmlDock === false, JSON.stringify(dockState(dom)));
+  record('Esc 归属：详情关掉后 Esc 正常关闭面板',
+    panelOpen(dom) === false, JSON.stringify(panelState(dom)));
   dom.window.close();
 }
 
 (async () => {
   await scenarioFastPath();
   await scenarioSearchPath();
-  await scenarioUndockRestoresPanel();
-  await scenarioKeepPanelDisabledClosesPanel();
-  await scenarioNarrowWindowClosesPanel();
+  await scenarioMallDialogStacksAbovePanel();
+  await scenarioNoDockLeftovers();
+  await scenarioNarrowWindowKeepsPanel();
   await scenarioEscapeBelongsToMallDialog();
   await scenarioNoSubstringMismatch();
   await scenarioNotFound();

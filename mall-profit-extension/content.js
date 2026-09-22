@@ -17,7 +17,6 @@
     mallSearchPlaceholder: '搜索物品名',
     mallItemTableHeader: '物品名',
     highlightMs: 1800,
-    minDockWidth: 900,
     defaultStatusNote: '忽略路程与运输成本 · 自动隐藏标记商店'
   });
 
@@ -25,8 +24,7 @@
     market: 'mallProfit.market.v1',
     totals: 'mallProfit.totals.v1',
     analyses: 'mallProfit.analyses.v1',
-    portBlacklist: 'mallProfit.portBlacklist.v1',
-    prefs: 'mallProfit.prefs.v1'
+    portBlacklist: 'mallProfit.portBlacklist.v1'
   });
 
   const UNIT_SORT_OPTIONS = Object.freeze([
@@ -78,9 +76,7 @@
     minSellAmount: 0,
     vanillaFilter: 'all',
     anomalyMultiplier: 10,
-    keepPanelOnJump: true,
     panelOpen: false,
-    panelDocked: false,
     dataLoading: false,
     offerLoading: false,
     marketController: null,
@@ -125,7 +121,6 @@
             <div class="mpe-header-actions">
               <button class="mpe-button mpe-button-primary" id="mpe-calculate" type="button">开始计算</button>
               <button class="mpe-button mpe-button-secondary" id="mpe-refresh" type="button">刷新数据</button>
-              <button class="mpe-icon-button" id="mpe-undock" type="button" aria-label="展开面板" title="展开面板" hidden>⤢</button>
               <button class="mpe-icon-button" id="mpe-close" type="button" aria-label="关闭">×</button>
             </div>
           </header>
@@ -220,10 +215,6 @@
 
           <footer class="mpe-footer">
             <span>数据来自商城的公开报价接口，仅按当前价格计算 · 点击商品名称可跳到商城页面中的该物品详情</span>
-            <label class="mpe-footer-toggle" title="开启后，跳转时面板会收窄到右侧，方便一边看详情一边对照排行">
-              <input id="mpe-keep-panel" type="checkbox" checked>
-              跳转后保留面板
-            </label>
             <span id="mpe-row-count"></span>
           </footer>
         </aside>
@@ -271,9 +262,7 @@
       'mpe-panel',
       'mpe-calculate',
       'mpe-refresh',
-      'mpe-undock',
       'mpe-close',
-      'mpe-keep-panel',
       'mpe-data-status',
       'mpe-status-note',
       'mpe-sort',
@@ -324,15 +313,6 @@
     elements['mpe-launcher'].addEventListener('click', openPanel);
     elements['mpe-close'].addEventListener('click', closePanel);
     elements['mpe-backdrop'].addEventListener('click', closePanel);
-    elements['mpe-undock'].addEventListener('click', () => {
-      setDocked(false);
-      elements['mpe-close'].focus();
-    });
-    elements['mpe-keep-panel'].addEventListener('change', (event) => {
-      state.keepPanelOnJump = event.target.checked;
-      if (!state.keepPanelOnJump && state.panelDocked) setDocked(false);
-      void persistPrefs();
-    });
     elements['mpe-calculate'].addEventListener('click', runCalculation);
     elements['mpe-refresh'].addEventListener('click', handleRefresh);
     elements['mpe-cancel'].addEventListener('click', cancelOfferCalculation);
@@ -410,8 +390,8 @@
         return;
       }
       if (!state.panelOpen) return;
-      // 并排模式下商城的物品详情也开着时，Esc 让给商城去关详情，别顺手把面板也关了
-      if (state.panelDocked && findMallDialog()) return;
+      // 商城的物品详情显示在面板之上，Esc 让给商城去关详情，别顺手把面板也关了
+      if (findMallDialog()) return;
       closePanel();
     });
   }
@@ -421,27 +401,9 @@
     return document.querySelector('body > [data-slot="dialog-content"], body > [role="dialog"]:not([id^="mpe-"])');
   }
 
-  // 并排模式：跳转后不关面板，而是把面板收窄到右侧，同时让商城模态框让出空间。
-  // 窗口太窄时左右并排没有意义，此时退回「关闭面板」的老行为。
-  function canDockPanel() {
-    return state.keepPanelOnJump && window.innerWidth >= CONFIG.minDockWidth;
-  }
-
   function syncPanelChrome() {
-    const docked = state.panelOpen && state.panelDocked;
-
-    elements['mpe-panel'].dataset.dock = docked ? 'true' : 'false';
-    elements['mpe-undock'].hidden = !docked;
-    document.documentElement.classList.toggle('mpe-dock', docked);
-
-    // 并排看的时候不能再用遮罩压暗商城，也不能锁页面滚动，否则详情根本没法操作
-    elements['mpe-backdrop'].hidden = !state.panelOpen || docked;
-    document.documentElement.classList.toggle('mpe-panel-open', state.panelOpen && !docked);
-  }
-
-  function setDocked(docked) {
-    state.panelDocked = Boolean(docked);
-    syncPanelChrome();
+    elements['mpe-backdrop'].hidden = !state.panelOpen;
+    document.documentElement.classList.toggle('mpe-panel-open', state.panelOpen);
   }
 
   function openPanel() {
@@ -458,7 +420,6 @@
 
   function closePanel() {
     state.panelOpen = false;
-    state.panelDocked = false;
     elements['mpe-panel'].dataset.open = 'false';
     elements['mpe-panel'].setAttribute('aria-hidden', 'true');
     syncPanelChrome();
@@ -1404,25 +1365,12 @@
       }
 
       const calculationRunning = state.offerLoading;
-      // 保留面板时先切到并排模式，再点开详情，
-      // 这样商城模态框一出生就让开了右侧面板的位置，不会先铺满再跳一下
-      const sideBySide = canDockPanel();
-      if (sideBySide) setDocked(true);
-      else closePanel();
-      try {
-        activateMallRow(row, itemName);
-      } catch (activateError) {
-        // 关掉面板的分支里若点击失败，就把面板恢复出来，避免用户只能看到空白
-        if (!sideBySide) openPanel();
-        throw activateError;
-      }
-      state.jumpNotice = sideBySide
-        ? (calculationRunning
-          ? `已打开「${itemName}」详情，面板保持打开，后台计算仍在继续。`
-          : `已打开「${itemName}」详情，面板保持打开以便对照。`)
-        : (calculationRunning
-          ? `已在商城页面中打开「${itemName}」，后台计算仍在继续。`
-          : `已在商城页面中打开「${itemName}」。`);
+      // 面板不关闭、也不收窄：商城自己的物品详情会显示在面板之上，
+      // 关掉详情后原样回到排行，后台计算也不会被打断
+      activateMallRow(row, itemName);
+      state.jumpNotice = calculationRunning
+        ? `已打开「${itemName}」详情，面板保持打开，后台计算仍在继续。`
+        : `已打开「${itemName}」详情，面板保持打开，关掉详情即可继续看排行。`;
     } catch (error) {
       state.error = `跳转失败：${error.message || '未知错误'}`;
     } finally {
@@ -1444,7 +1392,6 @@
     elements['mpe-vanilla-filter'].value = state.vanillaFilter;
     elements['mpe-anomaly-filter'].value = String(state.anomalyMultiplier);
     elements['mpe-sort'].value = state.sortKey;
-    elements['mpe-keep-panel'].checked = state.keepPanelOnJump;
     setBusy();
   }
 
@@ -1553,13 +1500,8 @@
         STORAGE_KEYS.market,
         STORAGE_KEYS.totals,
         STORAGE_KEYS.analyses,
-        STORAGE_KEYS.portBlacklist,
-        STORAGE_KEYS.prefs
+        STORAGE_KEYS.portBlacklist
       ]);
-      const prefs = stored[STORAGE_KEYS.prefs];
-      if (prefs && typeof prefs === 'object' && typeof prefs.keepPanelOnJump === 'boolean') {
-        state.keepPanelOnJump = prefs.keepPanelOnJump;
-      }
 
       const market = stored[STORAGE_KEYS.market];
       if (market && isFresh(market.savedAt) && Array.isArray(market.items)) {
@@ -1652,19 +1594,6 @@
       state.storageWarning = '';
     } catch (error) {
       noteStorageFailure('港口黑名单', error);
-    }
-  }
-
-  async function persistPrefs() {
-    try {
-      await chrome.storage.local.set({
-        [STORAGE_KEYS.prefs]: {
-          keepPanelOnJump: state.keepPanelOnJump
-        }
-      });
-      state.storageWarning = '';
-    } catch (error) {
-      noteStorageFailure('界面偏好', error);
     }
   }
 
