@@ -22,7 +22,7 @@ npm i -D jsdom          # once; jsdom is intentionally not a project dependency
 node tools/e2e/jsdom-harness.js
 ```
 
-Prints `PASS`/`FAIL` per assertion and `n/77 通过` at the end. Covers:
+Prints `PASS`/`FAIL` per assertion and `n/81 通过` at the end. Covers:
 
 - fast path: row already rendered, search box untouched, panel stays open on top of
   the mall detail, and the mall dialog is still a `body`-level child;
@@ -62,8 +62,14 @@ Prints `PASS`/`FAIL` per assertion and `n/77 通过` at the end. Covers:
 - calculation scope: with a 12-item fixture, switching to `filtered` must calculate the
   whole filter result; searching `矿石1` (which matches only `矿石10…矿石12`) must both
   shrink the count on the calculate button and leave the other nine items' offers
-  endpoints untouched. Also covers the status-line wording, and that clearing the search
-  restores the full count without dropping the rows already computed.
+  endpoints untouched. Also covers the status-line wording, that clearing the search
+  restores the full count without dropping the rows already computed, and that
+  "minimum sell amount" filters the table and the calculation scope by the *same*
+  number — the fixture's post-filter amounts (2657) differ from its snapshot amounts
+  (100…111), so a limit of 1000 must leave exactly the rows the table shows.
+- error-state reset: after an `/offers` failure shows the retry button, switching the
+  anomaly multiplier must clear it — the cache is replaced wholesale, so the old counts
+  have nothing left to top up.
 
 If `jsdom` cannot be resolved, the script exits with code 2 and a hint. You can
 also point `NODE_PATH` at any `node_modules` that contains it.

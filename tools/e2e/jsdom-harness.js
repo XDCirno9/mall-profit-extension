@@ -983,6 +983,47 @@ async function scenarioScopeLimitedCalculation() {
     calcButtonText(dom).includes(`（${SCOPE_ITEMS.length} 条）`) && rowNames(dom).length === 3,
     `button=${calcButtonText(dom)} rows=${rowNames(dom).length}`);
 
+  // 表格里的「在售数量」是剔除异常报价后的合计（夹具里是 2657），商品快照上是 100…111。
+  // 计算范围必须用同一套数字：两边各算一套的话，这里筛出来是 0 条而表里还有 3 行，
+  // 按钮会写「重新计算」而表里明明有内容。
+  typeInto(dom, document.getElementById('mpe-min-sell-amount'), '1000');
+  await sleep(INPUT_SETTLE_MS);
+  record('计算范围：最低在售数量的口径与表格一致',
+    rowNames(dom).length === 3 && calcButtonText(dom).includes(`（${rowNames(dom).length} 条）`),
+    `button=${calcButtonText(dom)} rows=${rowNames(dom).length}`);
+
+  dom.window.close();
+}
+
+// 换异常过滤倍数 = 换整套缓存，上一轮的失败记录必须跟着作废（v1.10.0 修复）
+async function scenarioErrorStateResets() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
+  buildMallDom(dom, ITEMS);
+  await openPanelOnly(dom);
+
+  const originalFetch = dom.window.fetch;
+  dom.window.fetch = async (input, init) => {
+    const target = new URL(String(input));
+    if (target.pathname.endsWith('/offers') && decodeURIComponent(target.pathname).includes('石头')) {
+      throw new Error('模拟报价接口失败');
+    }
+    return originalFetch(input, init);
+  };
+
+  dom.window.document.getElementById('mpe-calculate').click();
+  await waitFor(() => retryButton(dom).hidden === false, '失败后出现重试按钮', 12000);
+  record('失败记录：算出错后出现重试按钮',
+    retryButton(dom).hidden === false, `text=${retryButton(dom).textContent}`);
+
+  // 缓存已经整套换掉了，旧计数无从补齐，按钮不该继续挂着它
+  commitChange(dom, 'mpe-anomaly-filter', '5');
+  await sleep(50);
+  record('失败记录：切换异常过滤倍数后清空，按钮不再挂着旧计数',
+    retryButton(dom).hidden === true, `hidden=${retryButton(dom).hidden} text=${retryButton(dom).textContent}`);
+  record('失败记录：切换后表格清空，按钮回到开始计算',
+    rowNames(dom).length === 0 && calcButtonText(dom).startsWith('开始计算'),
+    `rows=${rowNames(dom).length} button=${calcButtonText(dom)}`);
+
   dom.window.close();
 }
 
@@ -1005,6 +1046,7 @@ async function scenarioScopeLimitedCalculation() {
   await scenarioStaleCacheKeepsRows();
   await scenarioRetryFailedItems();
   await scenarioScopeLimitedCalculation();
+  await scenarioErrorStateResets();
 
   const failed = results.filter((item) => !item.ok);
   console.log(`\n${results.length - failed.length}/${results.length} 通过`);

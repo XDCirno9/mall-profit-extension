@@ -389,6 +389,8 @@
     elements['mpe-anomaly-filter'].addEventListener('change', (event) => {
       state.anomalyMultiplier = Number(event.target.value) || 0;
       cancelOfferCalculation(false);
+      // 换了倍数等于换了整套缓存，「重试失败项」不该再挂着上一套条件下的失败记录
+      state.offerErrors.clear();
       state.error = '';
       render();
     });
@@ -623,6 +625,8 @@
     if (changed) {
       state.analysisCache = {};
       cancelOfferCalculation(false);
+      // 缓存整套清空了，失败记录跟着作废，否则按钮会挂着已经无从补齐的计数
+      state.offerErrors.clear();
       await clearAnalysisStorage();
       await persistPortBlacklist();
     }
@@ -913,6 +917,12 @@
   }
 
   // for-in 碰到第一个键就返回，对非空对象是 O(1)，不会像 Object.keys() 那样还得把键收集一遍
+  // state.unitRows 在 loadMarket / loadStoredData 里跟着 items 一起生成，
+  // 这里兜底「items 有了、unitRows 还没建」的那一瞬
+  function getUnitRows() {
+    return state.unitRows.length ? state.unitRows : Core.buildUnitRows(state.items);
+  }
+
   function hasAnyKey(object) {
     for (const key in object) return true;
     return false;
@@ -961,8 +971,10 @@
     return state.analysisCache[key];
   }
 
-  function hasFreshAnalysis(itemName) {
-    const entry = getCurrentAnalysisCache()[itemName];
+  // cache 由调用方传进来：算报价前要按行问「哪些还没算过」，成千上万次调用，
+  // 而 getCurrentAnalysisCache() 每次都重算 key（港口名排序 + hash），传引用能整轮省掉
+  function hasFreshAnalysis(cache, itemName) {
+    const entry = cache[itemName];
     return Boolean(entry && isFresh(entry.updatedAt));
   }
 
@@ -986,15 +998,13 @@
     if (!state.analysisCache[cacheKey]) state.analysisCache[cacheKey] = {};
     const cache = state.analysisCache[cacheKey];
     // 待办 = 计算范围内的行里还没有新鲜结果的。默认范围是全量商品，选了「当前筛选结果」
-    // 就是筛选后按当前排序取的最前面 N 条。
+    // 就是筛选出来的全部行。
     // 「重试失败项」不吃范围限制，直接在全量里挑上一轮失败的那些——用户点这个按钮要补的
     // 就是那几个，不该因为随后改了范围就变成重算几百条。
-    const targets = retryOnly
-      ? (state.unitRows.length ? state.unitRows : Core.buildUnitRows(state.items))
-      : getScopeTargets();
+    const targets = retryOnly ? getUnitRows() : getScopeTargets();
     // offerErrors 必须在切出待办之后再清，否则就找不到上一轮失败的到底是哪几个了
     const failed = retryOnly ? new Set(state.offerErrors) : null;
-    const pending = targets.filter((row) => !hasFreshAnalysis(row.itemName));
+    const pending = targets.filter((row) => !hasFreshAnalysis(cache, row.itemName));
     const missing = failed ? pending.filter((row) => failed.has(row.itemName)) : pending;
     state.offerErrors.clear();
     state.truncatedCount = 0;
@@ -1080,11 +1090,9 @@
       cancelOfferCalculation(false);
     }
 
-    // 同 ensureAnomalyAnalysis：范围默认全量，选「当前筛选结果」就只算最前面的 N 条；
+    // 同 ensureAnomalyAnalysis：范围默认全量，选「当前筛选结果」就只算筛选出来的那些；
     // 「重试失败项」不受范围影响，只补上一轮报错的那几个。
-    const targets = retryOnly
-      ? (state.unitRows.length ? state.unitRows : Core.buildUnitRows(state.items))
-      : getScopeTargets();
+    const targets = retryOnly ? getUnitRows() : getScopeTargets();
     const failed = retryOnly ? new Set(state.offerErrors) : null;
     const pending = targets.filter((row) => !hasFreshTotal(row.itemName));
     const missing = failed ? pending.filter((row) => failed.has(row.itemName)) : pending;
@@ -1198,9 +1206,10 @@
 
   function calculationNeeded() {
     if (!state.items.length) return true;
-    const rows = state.unitRows.length ? state.unitRows : Core.buildUnitRows(state.items);
+    const rows = getUnitRows();
     if (state.anomalyMultiplier > 0 || state.portBlacklist.length > 0) {
-      return rows.some((row) => !hasFreshAnalysis(row.itemName));
+      const cache = getCurrentAnalysisCache();
+      return rows.some((row) => !hasFreshAnalysis(cache, row.itemName));
     }
     if (state.mode === 'total') {
       return rows.some((row) => !hasFreshTotal(row.itemName));
@@ -1237,7 +1246,7 @@
 
     const calculable = state.anomalyMultiplier > 0 || state.portBlacklist.length > 0 || state.mode === 'total';
     elements['mpe-calculate'].disabled = busy || !state.items.length || !calculable;
-    // 带上条数：范围可以被限制成「当前筛选结果的前 N 条」，
+    // 带上条数：范围可能是「当前筛选结果」这样的一小撮，
     // 只写「开始计算」用户没法预判这一下要发出去多少请求
     const scopeSuffix = state.scopeTargetCount > 0
       ? `（${integerFormatter.format(state.scopeTargetCount)} 条）`
@@ -1270,53 +1279,68 @@
     return true;
   }
 
-  function getScopeRows() {
-    const search = state.search.trim().toLocaleLowerCase('zh-CN');
-    return state.unitRows.filter((row) => matchesFilter(row, search));
+  function currentSearchKeyword() {
+    return state.search.trim().toLocaleLowerCase('zh-CN');
   }
 
-  // 计算范围要算的行：默认全部正利润商品，选「当前筛选结果」就是筛选后的全部行。
-  // 不能拿 getVisibleRows() 当范围：计算前分析缓存是空的，异常过滤模式下绝大多数行会被判成
-  // 不可见，筛出来是 0 条。
+  // 把分析 / 总利润缓存合并进商品快照行，表格和计算范围共用这一份数字。
+  // 两边各算一套的话，「最低在售数量」会在表格里按「剔除异常报价后的数量」筛、
+  // 在计算范围里按商城原始快照筛，于是出现「表里只剩 3 行、按钮却写要算 37 条」。
+  // strict=true（表格）丢掉「还没算过」和「被异常规则判定排除」的行；
+  // strict=false（计算范围）保留它们——点计算的时候缓存本来就是空的，全丢掉就没东西可算了。
+  function mergeRow(row, cache, strict) {
+    if (state.anomalyMultiplier > 0 || state.portBlacklist.length > 0) {
+      const analysis = cache[row.itemName];
+      if (!analysis) return strict ? null : { ...row };
+      // 被异常规则排除的行在表格里不显示，但报价变了之后它可能重新合格，所以范围里照样要算
+      if (analysis.excluded) {
+        return strict ? null : { ...row, sellAmount: analysis.sellAmount };
+      }
+      return {
+        ...row,
+        minSellPrice: analysis.minSellPrice,
+        maxBuyPrice: analysis.maxBuyPrice,
+        sellAmount: analysis.sellAmount,
+        sellOfferCount: analysis.sellOfferCount,
+        buyOfferCount: analysis.buyOfferCount,
+        unitProfit: analysis.unitProfit,
+        profitRate: analysis.profitRate,
+        totalProfit: analysis.totalProfit,
+        matchedQty: analysis.matchedQty,
+        outlierCount: analysis.outlierCount,
+        // 单纯过了 5 分钟有效期不再丢行——否则用户算完过一会儿回来会看到整张表凭空变空
+        stale: !isFresh(analysis.updatedAt)
+      };
+    }
+    const total = state.totalCache[row.itemName];
+    // 单件利润模式下表格里的数字来自商品快照，跟总利润缓存是否过期无关
+    if (!total || state.mode !== 'total') return { ...row };
+    return {
+      ...Core.withTotalProfit(row, total),
+      stale: !isFresh(total.updatedAt)
+    };
+  }
+
+  // 计算范围要算的行：默认全部正利润商品，选「当前筛选结果」就是筛选出来的全部行。
+  // 不能改回 getVisibleRows()：计算前分析缓存是空的，strict 会把绝大多数行判成不可见。
   function getScopeTargets() {
     if (state.calcScope !== 'filtered') return state.unitRows;
     return getScopeRows();
   }
 
+  function getScopeRows() {
+    const search = currentSearchKeyword();
+    const cache = getCurrentAnalysisCache();
+    return state.unitRows
+      .map((row) => mergeRow(row, cache, false))
+      .filter((row) => Boolean(row) && matchesFilter(row, search));
+  }
+
   function getVisibleRows() {
-    const search = state.search.trim().toLocaleLowerCase('zh-CN');
+    const search = currentSearchKeyword();
     const cache = getCurrentAnalysisCache();
     const rows = state.unitRows
-      .map((row) => {
-        if (state.anomalyMultiplier > 0 || state.portBlacklist.length > 0) {
-          const analysis = cache[row.itemName];
-          // 只有「从来没算过」和「被异常规则判定排除」才不显示。
-          // 单纯过了 5 分钟有效期不再丢行——否则用户算完过一会儿回来会看到整张表凭空变空，
-          // 这里保留旧结果并打上 stale 标记，由状态栏提示可以重新计算。
-          if (!analysis || analysis.excluded) return null;
-          return {
-            ...row,
-            minSellPrice: analysis.minSellPrice,
-            maxBuyPrice: analysis.maxBuyPrice,
-            sellAmount: analysis.sellAmount,
-            sellOfferCount: analysis.sellOfferCount,
-            buyOfferCount: analysis.buyOfferCount,
-            unitProfit: analysis.unitProfit,
-            profitRate: analysis.profitRate,
-            totalProfit: analysis.totalProfit,
-            matchedQty: analysis.matchedQty,
-            outlierCount: analysis.outlierCount,
-            stale: !isFresh(analysis.updatedAt)
-          };
-        }
-        const total = state.totalCache[row.itemName];
-        // 单件利润模式下表格里的数字来自商品快照，跟总利润缓存是否过期无关
-        if (!total || state.mode !== 'total') return { ...row };
-        return {
-          ...Core.withTotalProfit(row, total),
-          stale: !isFresh(total.updatedAt)
-        };
-      })
+      .map((row) => mergeRow(row, cache, true))
       .filter((row) => Boolean(row) && matchesFilter(row, search));
 
     return Core.sortRows(rows, state.sortKey);
@@ -1504,7 +1528,7 @@
     state.error = '';
     state.jumpNotice = '';
     state.jumpBusy = itemName;
-    renderStatus(getVisibleRows());
+    renderStatus();
 
     let searchInput = null;
     let previousSearch = '';
@@ -1569,13 +1593,12 @@
     syncInputValue(elements['mpe-min-sell-amount'], state.minSellAmount > 0 ? String(state.minSellAmount) : '');
     elements['mpe-vanilla-filter'].value = state.vanillaFilter;
     elements['mpe-anomaly-filter'].value = String(state.anomalyMultiplier);
-    // 条数上限只在「当前筛选结果」范围下有意义：其余范围里置灰并清空，让占位符露出默认值，
-    // 否则用户会以为在「全部商品」下填的数字也生效
     elements['mpe-calc-scope'].value = state.calcScope;
     setBusy();
   }
 
-  function renderStatus(rows) {
+  // rows 可以不传：跳转时只想立刻把「正在定位…」刷出来，不需要顺手统计过期条数
+  function renderStatus(rows = []) {
     const count = state.unitRows.length;
     if (state.dataLoading) {
       elements['mpe-data-status'].textContent = '正在读取商城数据…';
@@ -1605,7 +1628,7 @@
         notice = true;
       } else {
         // 过期结果继续显示，但要说明白它是旧的，别让用户以为报价已经刷新过
-        const staleCount = (Array.isArray(rows) ? rows : []).filter((row) => row.stale).length;
+        const staleCount = rows.filter((row) => row.stale).length;
         if (staleCount > 0) {
           const ttlMinutes = Math.round(CONFIG.cacheTtlMs / 60000);
           note = `${integerFormatter.format(staleCount)} 个商品的报价已超过 ${ttlMinutes} 分钟有效期，点击「重新计算」可刷新。`;
@@ -1835,24 +1858,3 @@
     void start();
   }
 })();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
