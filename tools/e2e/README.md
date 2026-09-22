@@ -22,7 +22,7 @@ npm i -D jsdom          # once; jsdom is intentionally not a project dependency
 node tools/e2e/jsdom-harness.js
 ```
 
-Prints `PASS`/`FAIL` per assertion and `n/39 通过` at the end. Covers:
+Prints `PASS`/`FAIL` per assertion and `n/52 通过` at the end. Covers:
 
 - fast path: row already rendered, search box untouched, panel stays open on top of
   the mall detail, and the mall dialog is still a `body`-level child;
@@ -33,6 +33,11 @@ Prints `PASS`/`FAIL` per assertion and `n/39 通过` at the end. Covers:
 - cleanup: no leftovers of the old side-by-side mode (`data-dock`, `html.mpe-dock`,
   the enlarge button, the footer checkbox) in `content.js` or `content.css`;
 - narrow window: the panel stays open even below 900px;
+- header sort: every column except `#` is clickable, the arrow and `aria-sort` track
+  the active column, a numeric column sorts descending on first click and reverses on
+  the second, the item-name column starts ascending, the old toolbar `<select>` is
+  gone, switching modes re-seeds the sort when the column disappears, and clicking a
+  header neither fetches `/offers` nor touches the calculate button;
 - Escape: while a mall dialog is open the panel survives; once it is gone, Escape
   closes the panel;
 - exact matching: `圆石` does not select `石头` or `黄铁矿`;
@@ -146,8 +151,47 @@ Asserts that toggling a checkbox keeps `scrollTop` and does not rebuild the list
 that `{"foo":1}` and `[{"a":1}]` both report `导入失败：…` while keeping the
 current selection, and that a well-formed export imports cleanly.
 
+### 2.5 Run the header-sort driver
+
+```bash
+agent-browser open https://mall.vesego.xyz/mall --init-script tools/e2e/inject.js
+agent-browser set viewport 1600 900
+agent-browser wait 9000
+agent-browser eval "$(cat tools/e2e/run-sort.js)"
+
+# the driver pauses at phase "sorted" for a screenshot:
+agent-browser screenshot ./header-sort.png
+agent-browser eval 'window.__MPE_CONTINUE = true; "go"'
+# ...poll until phase "done", then:
+agent-browser eval 'JSON.stringify(window.__R)'
+```
+
+`run-sort.js` proves that the table header is now the sort control:
+
+| Field | Must be |
+| --- | --- |
+| `sortableHeaders` / `allColumns` | `6` / `7` — only `#` is not clickable |
+| `oldSortSelect` / `oldSortField` | `false` — the toolbar `<select>` is gone |
+| `initial.active` | `单件利润` with arrow `▼` and `aria-sort="descending"` |
+| `firstClickDescending` | `true` — a numeric column sorts high→low on the first click |
+| `secondClickAscending` | `true` — clicking the same column again reverses it |
+| `afterNameClick.active.label` | `商品`, arrow `▲` — text starts ascending |
+| `headerHitIsButton` / `headerHit` | `true` / `button.mpe-th-button.is-active` — hit-test proves the header cell is really clickable |
+| `activeHeaderRect[3]` / `rowHeight` | `38` / `46` — the padding change did not collapse the header or rows |
+| `offersDelta` | `0` — sorting never triggers a fetch |
+| `unitModeActive` | the sort falls back to `单件利润` after the column disappears |
+
+`columnNumbers()` reads the rendered cells, so `firstClickDescending` /
+`secondClickAscending` verify the actual order rather than just the arrow. With
+more than 120 rows the driver narrows the table through the search box first,
+purely to keep the re-render fast.
+
 ## Gotchas that cost time
 
+- **`inject.js` only defines hooks — it does not inject anything by itself.** Every
+  driver must call `window.__mpeBoot()` as its first step (it returns `'booted'`,
+  `'already'`, `'failed'` or `'no-boot-hook'`). Skip it and the page simply has no
+  `#mpe-root`, which looks like "the panel never opened" rather than an error.
 - **The mall's item detail is a body-level modal.** Clicking a row inserts
   `body > div[role="dialog"][data-slot="dialog-content"][data-state="open"]`
   (radix, `w-[calc(100%-2rem)]` centered with `left-1/2 -translate-x-1/2`) plus a

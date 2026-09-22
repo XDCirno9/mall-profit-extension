@@ -297,19 +297,49 @@
     return direction === 'asc' ? a - b : b - a;
   }
 
+  // 表头每一列都能点：字段类型决定比较方式，方向上由 `${field}-${direction}` 里的后缀决定，
+  // 所以这里不再逐个枚举排序键，新增列只要往 SORT_FIELDS 里加一行。
+  const SORT_FIELDS = Object.freeze({
+    itemName: 'text',
+    minSellPrice: 'number',
+    maxBuyPrice: 'number',
+    unitProfit: 'number',
+    profitRate: 'number',
+    sellAmount: 'number',
+    totalProfit: 'number',
+    matchedQty: 'number'
+  });
+
+  const DEFAULT_SORT_KEY = 'unitProfit-desc';
+
+  function parseSortKey(sortKey) {
+    const match = typeof sortKey === 'string' ? /^([A-Za-z]+)-(asc|desc)$/.exec(sortKey) : null;
+    if (match && SORT_FIELDS[match[1]]) {
+      return { field: match[1], direction: match[2], type: SORT_FIELDS[match[1]], valid: true };
+    }
+    const fallback = /^([A-Za-z]+)-(asc|desc)$/.exec(DEFAULT_SORT_KEY);
+    return {
+      field: fallback[1],
+      direction: fallback[2],
+      type: SORT_FIELDS[fallback[1]],
+      valid: false
+    };
+  }
+
+  function compareByField(a, b, field, direction) {
+    if (SORT_FIELDS[field] === 'text') {
+      const result = String(a[field] ?? '').localeCompare(String(b[field] ?? ''), 'zh-CN');
+      return direction === 'asc' ? result : -result;
+    }
+    return compareNullable(a[field], b[field], direction);
+  }
+
   function sortRows(rows, sortKey) {
     const result = Array.isArray(rows) ? [...rows] : [];
-    const comparators = {
-      'unitProfit-desc': (a, b) => compareNullable(a.unitProfit, b.unitProfit, 'desc'),
-      'unitProfit-asc': (a, b) => compareNullable(a.unitProfit, b.unitProfit, 'asc'),
-      'totalProfit-desc': (a, b) => compareNullable(a.totalProfit, b.totalProfit, 'desc'),
-      'totalProfit-asc': (a, b) => compareNullable(a.totalProfit, b.totalProfit, 'asc'),
-      'profitRate-desc': (a, b) => compareNullable(a.profitRate, b.profitRate, 'desc'),
-      'minSellPrice-asc': (a, b) => compareNullable(a.minSellPrice, b.minSellPrice, 'asc'),
-      'itemName-asc': (a, b) => a.itemName.localeCompare(b.itemName, 'zh-CN')
-    };
-    const comparator = comparators[sortKey] || comparators['unitProfit-desc'];
-    return result.sort((a, b) => comparator(a, b) || a.itemName.localeCompare(b.itemName, 'zh-CN'));
+    const { field, direction } = parseSortKey(sortKey);
+    // 同值时统一按商品名兜底，保证每次排序结果稳定
+    return result.sort((a, b) => compareByField(a, b, field, direction)
+      || String(a.itemName ?? '').localeCompare(String(b.itemName ?? ''), 'zh-CN'));
   }
 
   global.MallProfitCore = Object.freeze({
@@ -322,7 +352,9 @@
     buildOfferAnalysis,
     calculateMatchedProfit,
     withTotalProfit,
-    sortRows
+    sortRows,
+    sortFields: SORT_FIELDS,
+    parseSortKey
   });
 })(globalThis);
 

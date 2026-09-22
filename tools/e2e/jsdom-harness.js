@@ -299,6 +299,38 @@ function clickItemName(dom, itemName) {
   return button;
 }
 
+// ---- 表头排序相关 ----
+function headerButtons(dom) {
+  return [...dom.window.document.querySelectorAll('#mpe-thead .mpe-th-button')];
+}
+
+function headerState(dom) {
+  const document = dom.window.document;
+  const active = document.querySelector('#mpe-thead th[data-active="true"]');
+  return {
+    columns: document.querySelectorAll('#mpe-thead th').length,
+    sortable: headerButtons(dom).length,
+    plain: [...document.querySelectorAll('#mpe-thead th.mpe-th-plain')]
+      .map((cell) => cell.textContent.trim()),
+    activeLabel: active ? active.querySelector('.mpe-th-label').textContent : '',
+    arrow: active ? active.querySelector('.mpe-th-arrow').textContent : '',
+    ariaSort: active ? active.getAttribute('aria-sort') : ''
+  };
+}
+
+function rowNames(dom) {
+  return [...dom.window.document.querySelectorAll('#mpe-tbody button[data-mpe-item]')]
+    .map((button) => button.dataset.mpeItem);
+}
+
+function clickHeader(dom, label) {
+  const button = headerButtons(dom)
+    .find((node) => node.querySelector('.mpe-th-label').textContent === label);
+  assert.ok(button, `表头应有可点击的「${label}」列`);
+  button.click();
+  return button;
+}
+
 const results = [];
 function record(name, ok, detail) {
   results.push({ name, ok, detail });
@@ -583,6 +615,103 @@ async function scenarioEscapeBelongsToMallDialog() {
   dom.window.close();
 }
 
+// 表头排序：每一列都能点，同列再点反转方向；排序只重排表格，绝不能触发计算
+async function scenarioHeaderSort() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
+  buildMallDom(dom, ITEMS);
+  await openPanelAndLoad(dom);
+
+  const requests = [];
+  const originalFetch = dom.window.fetch;
+  dom.window.fetch = async (input, init) => {
+    requests.push(String(input));
+    return originalFetch(input, init);
+  };
+  const calculate = dom.window.document.getElementById('mpe-calculate');
+  const calculateBefore = calculate.textContent;
+
+  // ITEMS 的单件利润：钻石 50 > 黄铁矿 5 > 圆石 3 > 石头 1.5
+  record('表头排序：默认排序列是单件利润且箭头向下',
+    headerState(dom).activeLabel === '单件利润'
+      && headerState(dom).arrow === '▼'
+      && headerState(dom).ariaSort === 'descending',
+    JSON.stringify(headerState(dom)));
+  record('表头排序：默认顺序就是单件利润从高到低',
+    rowNames(dom).join('>') === '钻石>黄铁矿>圆石>石头', rowNames(dom).join('>'));
+
+  record('表头排序：只有 # 序号列不可点，其余列都能点',
+    headerState(dom).columns === 7
+      && headerState(dom).sortable === 6
+      && headerState(dom).plain.join('') === '#',
+    JSON.stringify(headerState(dom)));
+  record('表头排序：工具栏原来的排序下拉已经移除',
+    dom.window.document.getElementById('mpe-sort') === null
+      && dom.window.document.querySelector('.mpe-sort-field') === null);
+
+  // 换一列：数值列第一次点按降序（在售数量 石头 111610 > 黄铁矿 700 > 圆石 500 > 钻石 30）
+  clickHeader(dom, '在售数量');
+  await sleep(30);
+  record('表头排序：换到「在售数量」时第一次点是降序',
+    rowNames(dom).join('>') === '石头>黄铁矿>圆石>钻石'
+      && headerState(dom).activeLabel === '在售数量'
+      && headerState(dom).arrow === '▼',
+    `${headerState(dom).activeLabel}${headerState(dom).arrow} ${rowNames(dom).join('>')}`);
+
+  // 同一列再点一次：反转
+  clickHeader(dom, '在售数量');
+  await sleep(30);
+  record('表头排序：同一列再点一次反转为升序',
+    rowNames(dom).join('>') === '钻石>圆石>黄铁矿>石头'
+      && headerState(dom).arrow === '▲'
+      && headerState(dom).ariaSort === 'ascending',
+    `${headerState(dom).arrow} ${rowNames(dom).join('>')}`);
+
+  // 文本列第一次点按名称升序，而不是降序
+  clickHeader(dom, '商品');
+  await sleep(30);
+  const expectedNameAsc = ITEMS.map((item) => item.itemName)
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'))
+    .join('>');
+  record('表头排序：商品列第一次点按名称升序',
+    rowNames(dom).join('>') === expectedNameAsc && headerState(dom).arrow === '▲',
+    `${rowNames(dom).join('>')} vs ${expectedNameAsc}`);
+
+  record('表头排序：搜索与数量过滤条件不受排序影响',
+    dom.window.document.getElementById('mpe-search').value === ''
+      && dom.window.document.getElementById('mpe-min-sell-amount').value === '');
+
+  // 红线：点表头既不该抓报价，也不该把「计算」变成自动的
+  record('表头排序：点表头不会触发任何报价抓取',
+    requests.filter((url) => url.includes('/offers')).length === 0,
+    `requests=${JSON.stringify(requests)}`);
+  record('表头排序：点表头不会改动计算按钮状态',
+    calculate.textContent === calculateBefore && calculateBefore === '无需计算',
+    `before="${calculateBefore}" after="${calculate.textContent}"`);
+
+  // 总利润模式列变多，默认排序跟着切；切回单件模式时列已不存在，应自动回落
+  dom.window.document.querySelector('.mpe-segment[data-mode="total"]').click();
+  await sleep(40);
+  record('表头排序：切到总利润模式后表头变 8 列、可点 7 列、默认排总利润',
+    headerState(dom).columns === 8
+      && headerState(dom).sortable === 7
+      && headerState(dom).activeLabel === '总利润',
+    JSON.stringify(headerState(dom)));
+
+  clickHeader(dom, '可匹配数量');
+  await sleep(30);
+  record('表头排序：总利润模式下的「可匹配数量」同样可点',
+    headerState(dom).activeLabel === '可匹配数量' && headerState(dom).arrow === '▼',
+    JSON.stringify(headerState(dom)));
+
+  dom.window.document.querySelector('.mpe-segment[data-mode="unit"]').click();
+  await sleep(40);
+  record('表头排序：切回单件模式时已不存在的排序列自动回落到默认',
+    headerState(dom).activeLabel === '单件利润' && headerState(dom).arrow === '▼',
+    JSON.stringify(headerState(dom)));
+
+  dom.window.close();
+}
+
 (async () => {
   await scenarioFastPath();
   await scenarioSearchPath();
@@ -590,6 +719,7 @@ async function scenarioEscapeBelongsToMallDialog() {
   await scenarioNoDockLeftovers();
   await scenarioNarrowWindowKeepsPanel();
   await scenarioEscapeBelongsToMallDialog();
+  await scenarioHeaderSort();
   await scenarioNoSubstringMismatch();
   await scenarioNotFound();
   await scenarioMissingSearchBox();

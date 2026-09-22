@@ -27,21 +27,34 @@
     portBlacklist: 'mallProfit.portBlacklist.v1'
   });
 
-  const UNIT_SORT_OPTIONS = Object.freeze([
-    ['unitProfit-desc', '单件利润 高 → 低'],
-    ['unitProfit-asc', '单件利润 低 → 高'],
-    ['profitRate-desc', '利润率 高 → 低'],
-    ['minSellPrice-asc', '最低出售价 低 → 高'],
-    ['itemName-asc', '商品名称']
-  ]);
+  // 表头定义：field 为空的列（# 序号）不参与排序，其余列点一下表头即可升 / 降序。
+  // 数组顺序 = 表格列顺序，content.css 用 nth-child 定列宽，调整顺序要同步改样式。
+  const TABLE_COLUMNS = Object.freeze({
+    unit: Object.freeze([
+      Object.freeze({ label: '#', field: '' }),
+      Object.freeze({ label: '商品', field: 'itemName' }),
+      Object.freeze({ label: '最低出售价', field: 'minSellPrice' }),
+      Object.freeze({ label: '最高收购价', field: 'maxBuyPrice' }),
+      Object.freeze({ label: '单件利润', field: 'unitProfit' }),
+      Object.freeze({ label: '利润率', field: 'profitRate' }),
+      Object.freeze({ label: '在售数量', field: 'sellAmount' })
+    ]),
+    total: Object.freeze([
+      Object.freeze({ label: '#', field: '' }),
+      Object.freeze({ label: '商品', field: 'itemName' }),
+      Object.freeze({ label: '最低出售价', field: 'minSellPrice' }),
+      Object.freeze({ label: '最高收购价', field: 'maxBuyPrice' }),
+      Object.freeze({ label: '总利润', field: 'totalProfit' }),
+      Object.freeze({ label: '可匹配数量', field: 'matchedQty' }),
+      Object.freeze({ label: '单件利润', field: 'unitProfit' }),
+      Object.freeze({ label: '利润率', field: 'profitRate' })
+    ])
+  });
 
-  const TOTAL_SORT_OPTIONS = Object.freeze([
-    ['totalProfit-desc', '总利润 高 → 低'],
-    ['totalProfit-asc', '总利润 低 → 高'],
-    ['unitProfit-desc', '单件利润 高 → 低'],
-    ['profitRate-desc', '利润率 高 → 低'],
-    ['itemName-asc', '商品名称']
-  ]);
+  const MODE_DEFAULT_SORT = Object.freeze({
+    unit: 'unitProfit-desc',
+    total: 'totalProfit-desc'
+  });
 
   const numberFormatter = new Intl.NumberFormat('zh-CN', {
     maximumFractionDigits: 2
@@ -136,11 +149,6 @@
               <button class="mpe-segment" data-mode="total" type="button">总利润</button>
             </div>
 
-            <label class="mpe-field mpe-sort-field">
-              <span>排序</span>
-              <select id="mpe-sort"></select>
-            </label>
-
             <label class="mpe-field mpe-search-field">
               <span>搜索</span>
               <input id="mpe-search" type="search" placeholder="输入商品名称" autocomplete="off">
@@ -214,7 +222,7 @@
           </div>
 
           <footer class="mpe-footer">
-            <span>数据来自商城的公开报价接口，仅按当前价格计算 · 点击商品名称可跳到商城页面中的该物品详情</span>
+            <span>数据来自商城的公开报价接口，仅按当前价格计算 · 点击商品名称可跳到商城页面中的该物品详情 · 点击表头可切换排序</span>
             <span id="mpe-row-count"></span>
           </footer>
         </aside>
@@ -265,7 +273,6 @@
       'mpe-close',
       'mpe-data-status',
       'mpe-status-note',
-      'mpe-sort',
       'mpe-search',
       'mpe-min-sell-amount',
       'mpe-vanilla-filter',
@@ -305,7 +312,6 @@
 
     for (const id of ids) elements[id] = document.getElementById(id);
     bindEvents();
-    renderSortOptions();
     render();
   }
 
@@ -325,9 +331,14 @@
       state.minSellAmount = Number.isFinite(value) && value > 0 ? value : 0;
       render();
     });
-    elements['mpe-sort'].addEventListener('change', (event) => {
-      state.sortKey = event.target.value;
-      render();
+    // 表头每次都会整体重绘，所以用事件委托挂在 thead 上，不逐个 th 绑
+    elements['mpe-thead'].addEventListener('click', (event) => {
+      const target = event.target;
+      const button = target && typeof target.closest === 'function'
+        ? target.closest('.mpe-th-button')
+        : null;
+      if (!button || !elements['mpe-thead'].contains(button)) return;
+      toggleSort(button.dataset.sortField);
     });
     elements['mpe-vanilla-filter'].addEventListener('change', (event) => {
       state.vanillaFilter = event.target.value;
@@ -573,10 +584,9 @@
     const nextMode = mode === 'total' ? 'total' : 'unit';
     if (nextMode === state.mode) return;
     state.mode = nextMode;
-    state.sortKey = nextMode === 'total' ? 'totalProfit-desc' : 'unitProfit-desc';
+    state.sortKey = MODE_DEFAULT_SORT[nextMode];
     if (nextMode === 'unit' && state.anomalyMultiplier === 0) cancelOfferCalculation();
     renderMode();
-    renderSortOptions();
     render();
   }
 
@@ -596,15 +606,54 @@
     elements['mpe-explainer'].textContent = modeText + anomalyText + blockedText;
   }
 
-  function renderSortOptions() {
-    const options = state.mode === 'total' ? TOTAL_SORT_OPTIONS : UNIT_SORT_OPTIONS;
-    if (!options.some(([value]) => value === state.sortKey)) {
-      state.sortKey = options[0][0];
+  function getTableColumns() {
+    return TABLE_COLUMNS[state.mode === 'total' ? 'total' : 'unit'];
+  }
+
+  // 当前排序键必须落在本模式真实存在的列上。总利润模式切回单件模式时
+  // totalProfit-* 这一列已经不存在，这里会自动退回该模式的默认排序。
+  function normalizeSortKey(columns) {
+    const available = columns.filter((column) => column.field).map((column) => column.field);
+    const parsed = Core.parseSortKey(state.sortKey);
+    if (!available.includes(parsed.field)) {
+      state.sortKey = MODE_DEFAULT_SORT[state.mode === 'total' ? 'total' : 'unit'];
+      return Core.parseSortKey(state.sortKey);
     }
-    elements['mpe-sort'].innerHTML = options
-      .map(([value, label]) => `<option value="${value}">${label}</option>`)
-      .join('');
-    elements['mpe-sort'].value = state.sortKey;
+    state.sortKey = `${parsed.field}-${parsed.direction}`;
+    return parsed;
+  }
+
+  // 点表头只重排表格，不会触发报价计算：计算始终只能由「开始计算 / 重新计算」手动触发
+  function toggleSort(field) {
+    const column = getTableColumns().find((item) => item.field === field);
+    if (!field || !column) return;
+    const current = Core.parseSortKey(state.sortKey);
+    // 同一列再点一次就反转方向；换到新列时数值列先看大的（降序），商品列先按名称升序
+    const direction = current.field === field
+      ? (current.direction === 'asc' ? 'desc' : 'asc')
+      : (Core.sortFields[field] === 'text' ? 'asc' : 'desc');
+    state.sortKey = `${field}-${direction}`;
+    render();
+  }
+
+  function renderTableHeader(columns) {
+    const active = normalizeSortKey(columns);
+    elements['mpe-thead'].innerHTML = `<tr>${columns.map((column) => {
+      if (!column.field) {
+        return `<th class="mpe-th-plain">${escapeHtml(column.label)}</th>`;
+      }
+      const isActive = column.field === active.field;
+      const isAsc = active.direction === 'asc';
+      const arrow = isActive ? (isAsc ? '▲' : '▼') : '⇅';
+      const hint = isActive ? (isAsc ? '点击改为降序' : '点击改为升序') : '点击排序';
+      const ariaSort = isActive ? (isAsc ? 'ascending' : 'descending') : 'none';
+      return `<th aria-sort="${ariaSort}"${isActive ? ' data-active="true"' : ''}>`
+        + `<button class="mpe-th-button${isActive ? ' is-active' : ''}" type="button"`
+        + ` data-sort-field="${column.field}" title="${escapeHtml(`${column.label} · ${hint}`)}">`
+        + `<span class="mpe-th-label">${escapeHtml(column.label)}</span>`
+        + `<span class="mpe-th-arrow" aria-hidden="true">${arrow}</span>`
+        + '</button></th>';
+    }).join('')}</tr>`;
   }
 
   function sleep(ms, signal) {
@@ -1391,7 +1440,6 @@
     elements['mpe-min-sell-amount'].value = state.minSellAmount > 0 ? String(state.minSellAmount) : '';
     elements['mpe-vanilla-filter'].value = state.vanillaFilter;
     elements['mpe-anomaly-filter'].value = String(state.anomalyMultiplier);
-    elements['mpe-sort'].value = state.sortKey;
     setBusy();
   }
 
@@ -1437,11 +1485,9 @@
 
   function renderTable() {
     const rows = getVisibleRows();
-    const columns = state.mode === 'total'
-      ? ['#', '商品', '最低出售价', '最高收购价', '总利润', '可匹配数量', '单件利润', '利润率']
-      : ['#', '商品', '最低出售价', '最高收购价', '单件利润', '利润率', '在售数量'];
+    const columns = getTableColumns();
 
-    elements['mpe-thead'].innerHTML = `<tr>${columns.map((column) => `<th>${column}</th>`).join('')}</tr>`;
+    renderTableHeader(columns);
 
     if (!rows.length) {
       elements['mpe-tbody'].innerHTML = '';

@@ -443,7 +443,6 @@
 .mpe-table td {
   border-right: 1px solid #ded5c5;
   border-bottom: 1px solid #ded5c5;
-  padding: 9px 10px;
   vertical-align: middle;
 }
 
@@ -457,9 +456,17 @@
   font-weight: 900;
   text-align: left;
   white-space: nowrap;
+  /* 内边距交给表头里的按钮，这样整格都能点 */
+  padding: 0;
+}
+
+/* 不可排序的列（# 序号）没有按钮，内边距补在自己身上 */
+.mpe-table th.mpe-th-plain {
+  padding: 9px 10px;
 }
 
 .mpe-table td {
+  padding: 9px 10px;
   color: #354037;
   font-size: 13px;
   font-weight: 750;
@@ -487,6 +494,64 @@
 .mpe-table th:not(:nth-child(2)),
 .mpe-table td:not(:nth-child(2)) {
   text-align: right;
+}
+
+/* 表头就是排序控件：点一下切换升 / 降序，箭头指示当前状态 */
+.mpe-th-button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-height: 35px;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  padding: 9px 10px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 900;
+  text-align: inherit;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.mpe-table th:nth-child(2) .mpe-th-button {
+  justify-content: flex-start;
+}
+
+.mpe-table th:not(:nth-child(2)) .mpe-th-button {
+  justify-content: flex-end;
+}
+
+.mpe-th-button:hover {
+  background: rgba(255, 248, 232, 0.14);
+}
+
+.mpe-th-button:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--mpe-gold);
+}
+
+.mpe-th-arrow {
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.3;
+}
+
+.mpe-th-button.is-active {
+  color: var(--mpe-gold-soft);
+}
+
+.mpe-th-button.is-active .mpe-th-arrow {
+  opacity: 1;
+}
+
+/* 当前排序列整格也加深，配合 sticky 表头一眼能找到排的是哪一列 */
+.mpe-table th[data-active="true"] {
+  background: #45513f;
+  box-shadow: inset 0 -2px 0 var(--mpe-gold);
 }
 
 .mpe-rank {
