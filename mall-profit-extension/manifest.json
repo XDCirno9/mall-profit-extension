@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "鸢尾花商城利润筛选器",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "筛选商城利润，支持异常价格、原版/非原版和港口黑名单，点击商品名可直接跳转到商城物品详情。",
   "permissions": [
     "storage",

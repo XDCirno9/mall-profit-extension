@@ -306,30 +306,51 @@ async function scenarioNotFound() {
 
 async function scenarioMissingSearchBox() {
   const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
-  // 商城只渲染了详情区，没有物品表格与搜索框
-  dom.window.document.getElementById('root').innerHTML = '<div id="mall-detail">物品报价</div>';
+  // 有物品表、但没有搜索框，且目标物品不在当前列表里
+  const mall = buildMallDom(dom, [ITEMS[0]]);
+  mall.search.remove();
   await openPanelAndLoad(dom);
 
-  clickItemName(dom, '石头');
-  await sleep(200);
+  clickItemName(dom, '钻石');
+  await waitFor(() => errorText(dom).includes('跳转失败'), '缺少搜索框时的提示', 6000);
 
-  record('失败路径：找不到商城搜索框时给出提示',
-    errorText(dom).includes('跳转失败'), errorText(dom));
+  record('失败路径：有物品表但缺搜索框时给出提示',
+    errorText(dom).includes('搜索框'), errorText(dom));
   record('失败路径：面板保持打开', panelOpen(dom) === true);
   dom.window.close();
 }
 
-async function scenarioWrongRoute() {
-  const dom = await createExtensionDom('https://mall.vesego.xyz/map');
-  buildMallDom(dom, ITEMS);
+// 回归：商城首页在 `/` 与 `/mall` 都会渲染，跳转不能拿 URL 路径当判据
+async function scenarioRootPathAlsoWorks() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/');
+  const mall = buildMallDom(dom, ITEMS);
   await openPanelAndLoad(dom);
 
   clickItemName(dom, '石头');
-  await sleep(200);
+  await waitFor(() => mall.clickedNames.includes('石头'), '根路径下点击商城行', 6000);
 
-  record('失败路径：非 /mall 页面拒绝跳转并说明原因',
-    errorText(dom).includes('不是商城首页'), errorText(dom));
-  record('失败路径：非 /mall 页面面板保持打开', panelOpen(dom) === true);
+  record('回归：从根路径 `/` 进入商城也能跳转',
+    mall.clickedNames.includes('石头'), `clicked=${JSON.stringify(mall.clickedNames)}`);
+  record('回归：根路径跳转后面板自动关闭', panelOpen(dom) === false);
+  record('回归：根路径跳转不报错', errorText(dom) === '', errorText(dom));
+  record('回归：根路径跳转不碰搜索框',
+    mall.search.value === '' && mall.searchHistory.length === 0,
+    `search="${mall.search.value}" history=${JSON.stringify(mall.searchHistory)}`);
+  dom.window.close();
+}
+
+// 页面里既没有商城物品表也没有搜索框时才拒绝
+async function scenarioNoMallUi() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/help');
+  dom.window.document.getElementById('root').innerHTML = '<div id="mall-detail">帮助中心</div>';
+  await openPanelAndLoad(dom);
+
+  clickItemName(dom, '石头');
+  await waitFor(() => errorText(dom).includes('跳转失败'), '商城 DOM 缺失时的提示', 6000);
+
+  record('失败路径：页面没有商城物品表时拒绝并说明原因',
+    errorText(dom).includes('没有商城物品列表'), errorText(dom));
+  record('失败路径：无商城 DOM 时面板保持打开', panelOpen(dom) === true);
   dom.window.close();
 }
 
@@ -391,7 +412,8 @@ async function scenarioManualCalculationStillManual() {
   await scenarioNoSubstringMismatch();
   await scenarioNotFound();
   await scenarioMissingSearchBox();
-  await scenarioWrongRoute();
+  await scenarioRootPathAlsoWorks();
+  await scenarioNoMallUi();
   await scenarioNoCalculationTriggered();
   await scenarioManualCalculationStillManual();
 

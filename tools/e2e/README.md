@@ -8,9 +8,12 @@ There are two layers:
 
 - `jsdom-harness.js` — headless, fast, no browser. Fakes the mall page and asserts
   the jump contract. Run this on every change.
-- `run-*.js` + `inject.js` — real Chromium against `https://mall.vesego.xyz/mall`.
-  Slower, but it is the only way to prove the jump against the real React build,
-  the real table rebuild, and the real search API.
+- `run-*.js` + `inject.js` — real Chromium against the live mall. Slower, but it is
+  the only way to prove the jump against the real React build, the real table
+  rebuild, and the real search API.
+
+The mall serves the same SPA shell on every path, so `https://mall.vesego.xyz/` and
+`https://mall.vesego.xyz/mall` are both the mall home page. Verify against both.
 
 ## 1. Headless (jsdom)
 
@@ -19,13 +22,14 @@ npm i -D jsdom          # once; jsdom is intentionally not a project dependency
 node tools/e2e/jsdom-harness.js
 ```
 
-Prints `PASS`/`FAIL` per assertion and `n/20 通过` at the end. Covers:
+Prints `PASS`/`FAIL` per assertion and `n/24 通过` at the end. Covers:
 
 - fast path: row already rendered, search box untouched;
 - search path: search box written, row found, panel closed, name kept in the box;
 - exact matching: `圆石` does not select `石头` or `黄铁矿`;
-- failure paths: item absent, search box missing, not on `/mall` — panel stays open,
-  search box restored, reason shown;
+- regression: the jump works from the root path `/` too, not just `/mall`;
+- failure paths: item absent, table present but search box missing, page with no
+  mall UI at all — panel stays open, search box restored, reason shown;
 - non-conflict: no `/offers` request, no market refetch, calculate button untouched;
 - regression: the default `10x` filter still does not auto-calculate.
 
@@ -108,6 +112,10 @@ current selection, and that a well-formed export imports cleanly.
 
 ## Gotchas that cost time
 
+- **Never gate the jump on `location.pathname`.** The mall serves the same SPA shell
+  on `/`, `/mall`, `/mall/` and even unknown paths, so any path check rejects real
+  users. Detect the mall by its DOM — the item table whose `thead` contains `物品名`,
+  or the search input — and poll briefly before declaring failure.
 - **One shell command per scenario.** The `agent-browser` daemon dies when the
   shell that started it exits, so the page is gone by the next tool call. Chain
   `open`, the driver eval and the polling loop in a single command.

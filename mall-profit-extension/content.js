@@ -13,6 +13,7 @@
     fetchRetries: 2,
     maxOffers: 20000,
     jumpTimeoutMs: 8000,
+    mallUiTimeoutMs: 2000,
     mallSearchPlaceholder: '搜索物品名',
     mallItemTableHeader: '物品名',
     highlightMs: 1800,
@@ -1164,8 +1165,35 @@
   let highlightedRow = null;
   let highlightTimer = 0;
 
-  function isMallRoute() {
-    return /^\/mall(\/|$)/i.test(window.location.pathname || '');
+  // 商城是同一个 SPA 挂在多个路径上的：`/`、`/mall`、`/mall/` 打开的都是带物品表的商城首页，
+  // 而且服务端对任意路径都返回同一份外壳。所以判断"是不是商城页"只能看页面里有没有
+  // 商城的物品表或搜索框，不能看 URL 路径，否则从 `/` 进来的用户会被直接拦掉。
+  function hasMallUi() {
+    return Boolean(findMallItemTable() || findMallSearchInput());
+  }
+
+  function waitForMallUi(timeoutMs) {
+    if (hasMallUi()) return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = 0;
+      let poll = 0;
+
+      const finish = (ready) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        window.clearInterval(poll);
+        resolve(ready);
+      };
+
+      poll = window.setInterval(() => {
+        if (settled) return;
+        if (hasMallUi()) finish(true);
+      }, 120);
+      timer = window.setTimeout(() => finish(false), timeoutMs);
+    });
   }
 
   function findMallItemTable() {
@@ -1288,13 +1316,6 @@
 
     state.error = '';
     state.jumpNotice = '';
-
-    if (!isMallRoute()) {
-      state.error = '当前页不是商城首页（/mall），无法跳转到物品详情。';
-      render();
-      return;
-    }
-
     state.jumpBusy = itemName;
     renderStatus();
 
@@ -1302,6 +1323,11 @@
     let previousSearch = '';
 
     try {
+      // 商城 DOM 可能尚未挂载完成（例如刚刷新页面），先给它一点时间再判定失败
+      if (!(await waitForMallUi(CONFIG.mallUiTimeoutMs))) {
+        throw new Error('当前页面没有商城物品列表，请先打开商城页面再点击物品名');
+      }
+
       let row = findMallItemRow(itemName);
 
       if (!row) {
