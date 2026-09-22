@@ -23,6 +23,26 @@ const ITEMS = [
   { itemName: '黄铁矿', minSellPrice: 3, maxBuyPrice: 8, sellAmount: 700, sellOfferCount: 6, buyOfferCount: 5, totalOfferCount: 11, vanillaId: null }
 ];
 
+// 长夹具：验证「只算当前筛选结果的前 N 条」到底为哪几个商品拉过报价。
+// 单件利润随序号递增，所以「单件利润降序」挑出来的前几条是 矿石12…矿石08，
+// 而「按商品名升序」挑出来的是 矿石01…矿石05——两批完全不同，断言才有区分度。
+const SCOPE_ITEMS = Array.from({ length: 12 }, (unused, index) => {
+  const minSellPrice = 40 + index * 5;
+  return {
+    itemName: `矿石${String(index + 1).padStart(2, '0')}`,
+    minSellPrice,
+    maxBuyPrice: minSellPrice + index + 1,
+    sellAmount: 100 + index,
+    sellOfferCount: 2,
+    buyOfferCount: 2,
+    totalOfferCount: 4,
+    vanillaId: index % 2 === 0 ? null : 'minecraft:stone'
+  };
+});
+
+// 跟 content.js 的 CONFIG.maxScopeLimit 对齐，作为条数上限的契约写进断言
+const MAX_SCOPE_LIMIT = 3000;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function waitFor(predicate, label, timeoutMs = 4000) {
@@ -123,7 +143,8 @@ function buildMallDom(dom, initialItems) {
     const query = search.value.trim();
     searchHistory.push(query);
     dom.window.setTimeout(() => {
-      const matched = ITEMS.filter((item) => !query || item.itemName.includes(query));
+      const catalogue = dom.__items || ITEMS;
+      const matched = catalogue.filter((item) => !query || item.itemName.includes(query));
       // 模拟服务端只返回匹配项；同时覆盖「列表里原本没有」的场景
       const extra = dom.window.__extraSearchItems || [];
       renderRows([...matched, ...extra.filter((item) => !query || item.itemName.includes(query))]);
@@ -149,14 +170,19 @@ function buildMallDom(dom, initialItems) {
   };
 }
 
-async function createExtensionDom(url) {
+async function createExtensionDom(url, options = {}) {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url,
     runScripts: 'outside-only',
     pretendToBeVisual: true
   });
 
-  const store = {};
+  // seedStore 用来模拟「上一次会话留下的缓存」，例如把结果做旧来验证过期行为
+  const store = options.seedStore || {};
+  // items 用来在单个场景里换一套更长的商品列表，例如验证「只算前 N 条」的截断
+  const items = Array.isArray(options.items) && options.items.length ? options.items : ITEMS;
+  dom.__requests = [];
+  dom.__items = items;
   dom.window.chrome = {
     storage: {
       local: {
@@ -178,12 +204,13 @@ async function createExtensionDom(url) {
   dom.window.fetch = async (input) => {
     const target = new URL(String(input));
     const requestPath = target.pathname + target.search;
+    dom.__requests.push(requestPath);
     let payload;
 
     if (target.pathname === '/api/mall/items') {
       const limit = Number(target.searchParams.get('limit') || 100);
       const offset = Number(target.searchParams.get('offset') || 0);
-      payload = { total: ITEMS.length, items: ITEMS.slice(offset, offset + limit) };
+      payload = { total: items.length, items: items.slice(offset, offset + limit) };
     } else if (target.pathname === '/api/mall/ports') {
       payload = { ports: [{ portName: '星月湾', itemCount: 105 }, { portName: '五月花港', itemCount: 29 }] };
     } else if (/^\/api\/mall\/items\/.+\/offers$/.test(target.pathname)) {
@@ -202,6 +229,19 @@ async function createExtensionDom(url) {
   };
 
   dom.window.eval(PROFIT_CORE);
+
+  // content.js 在启动时把 globalThis.MallProfitCore 存进闭包，所以必须在它之前换掉整份导出。
+  // 导出对象本身是 Object.freeze 的，因此用浅拷贝包一层来做计数。
+  dom.__coreStats = { sortRows: 0 };
+  const realCore = dom.window.MallProfitCore;
+  dom.window.MallProfitCore = {
+    ...realCore,
+    sortRows(...args) {
+      dom.__coreStats.sortRows += 1;
+      return realCore.sortRows(...args);
+    }
+  };
+
   dom.window.eval(CONTENT_JS);
 
   // jsdom 构造后 readyState 仍是 loading，脚本会在 DOMContentLoaded 时启动
@@ -297,6 +337,53 @@ function clickItemName(dom, itemName) {
   assert.ok(button, `利润表格里应存在「${itemName}」这一行`);
   button.click();
   return button;
+}
+
+// content.js 的输入防抖是 220ms，等长一点再断言
+const INPUT_SETTLE_MS = 450;
+
+function rowNames(dom) {
+  return [...dom.window.document.querySelectorAll('#mpe-tbody button[data-mpe-item]')]
+    .map((node) => node.dataset.mpeItem);
+}
+
+function calcButtonText(dom) {
+  return dom.window.document.getElementById('mpe-calculate').textContent;
+}
+
+function retryButton(dom) {
+  return dom.window.document.getElementById('mpe-retry');
+}
+
+// 模拟真实输入：受控输入框必须走原生 value setter，再派发冒泡的 input 事件，
+// 直接改 value 或只派发 change 都不会触发监听
+function typeInto(dom, element, value) {
+  const descriptor = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value');
+  if (descriptor && descriptor.set) descriptor.set.call(element, value);
+  else element.value = value;
+  element.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+}
+
+// 报价接口带 query（?mode=buy&limit=…），所以只能按包含判断，不能用 endsWith
+function offerRequestCount(dom) {
+  return dom.__requests.filter((requestPath) => requestPath.includes('/offers')).length;
+}
+
+// 报价请求碰过哪些商品。路径里的中文是百分号编码的，必须解码后再比对
+function requestedOfferItems(dom) {
+  const names = new Set();
+  for (const requestPath of dom.__requests) {
+    const matched = requestPath.match(/\/items\/([^/]+)\/offers/);
+    if (matched) names.add(decodeURIComponent(matched[1]));
+  }
+  return names;
+}
+
+// 下拉和数字框都靠 change 事件生效，这里把「设值 + 派发冒泡 change」合成一步
+function commitChange(dom, id, value) {
+  const element = dom.window.document.getElementById(id);
+  element.value = value;
+  element.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
 }
 
 // ---- 表头排序相关 ----
@@ -510,7 +597,7 @@ async function scenarioManualCalculationStillManual() {
   const calculate = dom.window.document.getElementById('mpe-calculate');
 
   record('回归：默认 10× 过滤下仍不自动计算',
-    rowsWithFilter.trim() === '' && calculate.textContent === '开始计算',
+    rowsWithFilter.trim() === '' && calculate.textContent.startsWith('开始计算'),
     `empty="${rowsWithFilter.trim()}" button="${calculate.textContent}"`);
 
   // 关闭再打开面板，不应触发计算
@@ -520,7 +607,7 @@ async function scenarioManualCalculationStillManual() {
   await sleep(120);
 
   record('回归：重开面板不触发计算',
-    calculate.textContent === '开始计算' && panelOpen(dom) === true,
+    calculate.textContent.startsWith('开始计算') && panelOpen(dom) === true,
     `button="${calculate.textContent}"`);
   dom.window.close();
 }
@@ -712,6 +799,230 @@ async function scenarioHeaderSort() {
   dom.window.close();
 }
 
+// 渲染效率（v1.10.0）：输入防抖，且一次渲染里可见行只算一遍。
+// 用 sortRows 的调用次数当探针：content.js 里只有 getVisibleRows 会调它，
+// 一次渲染出现的次数就等于可见行被计算的次数（改之前是 3 —— 摘要 2 次 + 表头默认排序）。
+async function scenarioRenderEfficiency() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
+  buildMallDom(dom, ITEMS);
+  await openPanelAndLoad(dom);
+
+  const document = dom.window.document;
+  const search = document.getElementById('mpe-search');
+  const minSell = document.getElementById('mpe-min-sell-amount');
+
+  const searchBaseline = dom.__coreStats.sortRows;
+  typeInto(dom, search, '石');
+  typeInto(dom, search, '石头');
+  typeInto(dom, search, '石头石');
+  typeInto(dom, search, '石头');
+  record('渲染效率：连敲键盘期间不做任何全表重排',
+    dom.__coreStats.sortRows === searchBaseline,
+    `sortRows=${dom.__coreStats.sortRows} baseline=${searchBaseline}`);
+
+  await sleep(INPUT_SETTLE_MS);
+  const searchDelta = dom.__coreStats.sortRows - searchBaseline;
+  record('渲染效率：停止输入后只重排一次（可见行不再被算两遍）',
+    searchDelta === 1, `sortRows 增量=${searchDelta}`);
+  record('渲染效率：防抖结束后筛选结果正确',
+    rowNames(dom).join(',') === '石头', rowNames(dom).join(','));
+
+  typeInto(dom, search, '石头 ');
+  await sleep(INPUT_SETTLE_MS);
+  record('渲染效率：输入框里的尾随空格不会被写回逻辑吃掉',
+    search.value === '石头 ', JSON.stringify(search.value));
+  record('渲染效率：尾随空格不影响筛选（只在筛选前 trim）',
+    rowNames(dom).join(',') === '石头', rowNames(dom).join(','));
+
+  const minBaseline = dom.__coreStats.sortRows;
+  typeInto(dom, minSell, '1');
+  typeInto(dom, minSell, '10');
+  await sleep(INPUT_SETTLE_MS);
+  const minDelta = dom.__coreStats.sortRows - minBaseline;
+  record('渲染效率：最低在售数量同样只重排一次',
+    minDelta === 1, `sortRows 增量=${minDelta}`);
+  dom.window.close();
+}
+
+// 过期缓存（v1.10.0）：超过 5 分钟有效期的结果继续显示并说明已过期，而不是整表变空
+async function scenarioStaleCacheKeepsRows() {
+  const url = 'https://mall.vesego.xyz/mall';
+  const domA = await createExtensionDom(url);
+  buildMallDom(domA, ITEMS);
+  await openPanelOnly(domA);
+
+  record('过期缓存前置：默认 10× 过滤下按钮显示开始计算',
+    calcButtonText(domA).startsWith('开始计算'), calcButtonText(domA));
+
+  domA.window.document.getElementById('mpe-calculate').click();
+  await waitFor(() => rowNames(domA).length > 0, '异常过滤结果写入表格', 8000);
+
+  const analyses = domA.__store['mallProfit.analyses.v1'];
+  const staleAt = Date.now() - 10 * 60 * 1000;
+  let aged = 0;
+  for (const entries of Object.values(analyses || {})) {
+    for (const entry of Object.values(entries)) {
+      entry.updatedAt = staleAt;
+      aged += 1;
+    }
+  }
+  record('过期缓存前置：结果已写入本地缓存并做旧',
+    aged > 0, `aged=${aged} rows=${rowNames(domA).length}`);
+  domA.window.close();
+
+  // 用同一份（已经过期的）缓存重新打开页面
+  const domB = await createExtensionDom(url, { seedStore: domA.__store });
+  buildMallDom(domB, ITEMS);
+  await openPanelOnly(domB);
+  await sleep(60);
+
+  record('过期缓存：重开页面后过期结果仍然显示，不再凭空变空',
+    rowNames(domB).length > 0, `rows=${rowNames(domB).length}`);
+  record('过期缓存：状态栏说明数据已过有效期',
+    statusNote(domB).includes('有效期'), statusNote(domB));
+  record('过期缓存：计算按钮改成重新计算，与提示一致',
+    calcButtonText(domB).startsWith('重新计算'), calcButtonText(domB));
+  record('过期缓存：过期本身不会自动触发重算',
+    offerRequestCount(domB) === 0, `offers=${offerRequestCount(domB)}`);
+  domB.window.close();
+}
+
+// 失败项重试（v1.10.0）：失败的商品不会被写进缓存，一键重试只补它们
+async function scenarioRetryFailedItems() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
+  buildMallDom(dom, ITEMS);
+  await openPanelOnly(dom);
+
+  const originalFetch = dom.window.fetch;
+  let failing = true;
+  dom.window.fetch = async (input, init) => {
+    const target = new URL(String(input));
+    if (failing && target.pathname.endsWith('/offers') && decodeURIComponent(target.pathname).includes('石头')) {
+      throw new Error('模拟报价接口失败');
+    }
+    return originalFetch(input, init);
+  };
+
+  dom.window.document.getElementById('mpe-calculate').click();
+  await waitFor(() => rowNames(dom).length > 0, '其余商品完成计算', 12000);
+
+  const retry = retryButton(dom);
+  record('失败重试：出现「重试失败项」按钮并标出数量',
+    retry.hidden === false && retry.textContent.includes('1'),
+    `hidden=${retry.hidden} text=${retry.textContent}`);
+  record('失败重试：失败的商品不会混进结果里',
+    !rowNames(dom).includes('石头'), rowNames(dom).join(','));
+
+  const succeededRows = rowNames(dom).length;
+  const offersBeforeRetry = offerRequestCount(dom);
+  // 切原始请求数组要用总条数，不能用过滤后的报价条数
+  const requestsBeforeRetry = dom.__requests.length;
+  failing = false;
+  retry.click();
+  await waitFor(() => rowNames(dom).includes('石头'), '重试后补齐失败商品', 12000);
+
+  const offersUsed = offerRequestCount(dom) - offersBeforeRetry;
+  // 只看重试这一轮碰了哪些商品，比数请求条数更贴近契约（翻页会让条数随夹具变化）
+  const retriedItems = new Set(dom.__requests.slice(requestsBeforeRetry).map((requestPath) => {
+    const matched = requestPath.match(/\/items\/([^/]+)\/offers/);
+    return matched ? decodeURIComponent(matched[1]) : requestPath;
+  }));
+  record('失败重试：重试后失败商品被补齐', rowNames(dom).includes('石头'), rowNames(dom).join(','));
+  record('失败重试：只重新请求失败的那一个商品，已算好的结果不重算',
+    retriedItems.size === 1 && retriedItems.has('石头'),
+    `重试涉及=${[...retriedItems].join(',')} offers=${offersUsed}`);
+  record('失败重试：其余商品的结果没有被清掉',
+    rowNames(dom).length === succeededRows + 1,
+    `${succeededRows} → ${rowNames(dom).length}`);
+  record('失败重试：重试成功后按钮自动隐藏',
+    retryButton(dom).hidden === true, `hidden=${retryButton(dom).hidden}`);
+  dom.window.close();
+}
+
+// 计算范围（v1.10.0）：把范围收窄成「当前筛选结果的前 N 条」之后，
+// 只该为这 N 个商品拉报价，范围外的商品一个请求都不许发。
+async function scenarioScopeLimitedCalculation() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/mall', { items: SCOPE_ITEMS });
+  buildMallDom(dom, SCOPE_ITEMS);
+  // 保持默认 10× 异常过滤：这样「点计算」才真的会去拉报价，正好用来数请求
+  await openPanelOnly(dom);
+  const document = dom.window.document;
+
+  const scope = () => document.getElementById('mpe-calc-scope');
+  const limit = () => document.getElementById('mpe-scope-limit');
+
+  record('计算范围：默认算全部商品，按钮标出总条数，条数上限置灰',
+    scope().value === 'all'
+      && limit().disabled === true
+      && calcButtonText(dom) === `开始计算（${SCOPE_ITEMS.length} 条）`,
+    `scope=${scope().value} disabled=${limit().disabled} button=${calcButtonText(dom)}`);
+
+  commitChange(dom, 'mpe-calc-scope', 'filtered');
+  commitChange(dom, 'mpe-scope-limit', '5');
+  await sleep(30);
+
+  record('计算范围：切到当前筛选结果后条数上限可用，按钮只标这一轮的条数',
+    limit().disabled === false && calcButtonText(dom) === '开始计算（5 条）',
+    `disabled=${limit().disabled} button=${calcButtonText(dom)}`);
+
+  const firstBatch = ['矿石08', '矿石09', '矿石10', '矿石11', '矿石12'];
+  dom.__requests.length = 0;
+  document.getElementById('mpe-calculate').click();
+  await waitFor(() => rowNames(dom).length >= 5, '范围内的商品算完', 12000);
+
+  const touched = [...requestedOfferItems(dom)].sort();
+  record('计算范围：只为筛选结果里排最前面的 5 个商品拉报价，范围外一个请求都没发',
+    touched.length === 5 && firstBatch.every((name) => touched.includes(name)),
+    `touched=${touched.join(',')}`);
+  record('计算范围：表格里也只有这 5 条结果',
+    rowNames(dom).length === 5, `rows=${rowNames(dom).length}`);
+  record('计算范围：状态栏常驻说明这一轮只覆盖筛选结果的前几条',
+    statusNote(dom).includes('计算范围：当前筛选结果的前 5 条'), statusNote(dom));
+
+  // 总利润模式下排序键是 totalProfit-desc，但商品快照里 totalProfit 天生是 null，
+  // 按它排只会退化成按商品名。这时应当回退到单件利润降序挑前 5 条——
+  // 如果真按商品名挑，挑出来的会是 矿石01…矿石05，跟这里的断言正好对不上
+  document.querySelector('.mpe-segment[data-mode="total"]').click();
+  await sleep(30);
+  dom.__requests.length = 0;
+  document.getElementById('mpe-calculate').click();
+  await waitFor(() => requestedOfferItems(dom).size >= 5, '这一轮报价请求已发出', 12000);
+  await waitFor(() => calcButtonText(dom) !== '计算中…', '这一轮计算结束', 12000);
+
+  const totalTouched = [...requestedOfferItems(dom)].sort();
+  record('计算范围：排序键指向的列还没算出来时，按单件利润挑最前面的几条',
+    totalTouched.length === 5 && firstBatch.every((name) => totalTouched.includes(name)),
+    `touched=${totalTouched.join(',')}`);
+
+  commitChange(dom, 'mpe-calc-scope', 'all');
+  await sleep(30);
+  record('计算范围：切回全部商品后条数上限重新置灰，按钮恢复全量条数',
+    limit().disabled === true && calcButtonText(dom).includes(`（${SCOPE_ITEMS.length} 条）`),
+    `disabled=${limit().disabled} button=${calcButtonText(dom)}`);
+
+  // 范围要跟着搜索条件走：搜「矿石1」只剩 3 条，上限 5 条取不满，就按实际的 3 条算
+  commitChange(dom, 'mpe-calc-scope', 'filtered');
+  typeInto(dom, document.getElementById('mpe-search'), '矿石1');
+  await sleep(INPUT_SETTLE_MS);
+  record('计算范围：上限超过筛选结果时按实际条数算，范围跟着搜索走',
+    calcButtonText(dom).includes('（3 条）'), calcButtonText(dom));
+
+  // 非法输入必须显式报错并回滚到上一次的有效值，不做静默修改
+  commitChange(dom, 'mpe-scope-limit', '0');
+  await sleep(30);
+  record('计算范围：条数上限非法值显式报错并回滚',
+    errorText(dom).includes('条数上限') && limit().value === '5',
+    `error="${errorText(dom)}" value=${limit().value}`);
+
+  commitChange(dom, 'mpe-scope-limit', String(MAX_SCOPE_LIMIT + 1));
+  await sleep(30);
+  record('计算范围：条数上限超过上限时夹到上限并说明',
+    errorText(dom).includes('上限') && limit().value === String(MAX_SCOPE_LIMIT),
+    `error="${errorText(dom)}" value=${limit().value}`);
+
+  dom.window.close();
+}
+
 (async () => {
   await scenarioFastPath();
   await scenarioSearchPath();
@@ -727,6 +1038,10 @@ async function scenarioHeaderSort() {
   await scenarioNoMallUi();
   await scenarioNoCalculationTriggered();
   await scenarioManualCalculationStillManual();
+  await scenarioRenderEfficiency();
+  await scenarioStaleCacheKeepsRows();
+  await scenarioRetryFailedItems();
+  await scenarioScopeLimitedCalculation();
 
   const failed = results.filter((item) => !item.ok);
   console.log(`\n${results.length - failed.length}/${results.length} 通过`);

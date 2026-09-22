@@ -328,6 +328,24 @@
   min-width: 155px;
 }
 
+.mpe-scope-field select {
+  min-width: 145px;
+}
+
+.mpe-scope-limit-field input {
+  width: 96px;
+}
+
+/* 条数上限只在「当前筛选结果」范围下生效，另外两种范围里整块置灰，
+   别让用户以为在「全部商品」下填的数字也在起作用 */
+.mpe-field[data-disabled="true"] {
+  opacity: 0.45;
+}
+
+.mpe-field[data-disabled="true"] input {
+  cursor: not-allowed;
+}
+
 .mpe-field select:focus,
 .mpe-field input:focus {
   border-color: var(--mpe-gold);

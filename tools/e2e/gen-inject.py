@@ -60,7 +60,10 @@ TEMPLATE = r"""(function () {
   }
 
   // Record every request so a driver can prove what the extension did or did not do.
+  // The untouched fetch stays reachable so a driver can opt out of the /items
+  // rewrite below and measure against the real catalogue size.
   var originalFetch = window.fetch.bind(window);
+  window.__mpeOriginalFetch = originalFetch;
   window.__mpeFetchLog = [];
   window.fetch = function (input, init) {
     var url = typeof input === 'string' ? input : (input && input.url) || String(input);

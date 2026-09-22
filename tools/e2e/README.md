@@ -22,7 +22,7 @@ npm i -D jsdom          # once; jsdom is intentionally not a project dependency
 node tools/e2e/jsdom-harness.js
 ```
 
-Prints `PASS`/`FAIL` per assertion and `n/52 通过` at the end. Covers:
+Prints `PASS`/`FAIL` per assertion and `n/80 通过` at the end. Covers:
 
 - fast path: row already rendered, search box untouched, panel stays open on top of
   the mall detail, and the mall dialog is still a `body`-level child;
@@ -45,7 +45,28 @@ Prints `PASS`/`FAIL` per assertion and `n/52 通过` at the end. Covers:
 - failure paths: item absent, table present but search box missing, page with no
   mall UI at all — panel stays open, search box restored, reason shown;
 - non-conflict: no `/offers` request, no market refetch, calculate button untouched;
-- regression: the default `10x` filter still does not auto-calculate.
+- regression: the default `10x` filter still does not auto-calculate;
+- render efficiency: a burst of input events causes no re-sort at all and exactly one
+  after it settles, and one render sorts exactly once. The probe is
+  `MallProfitCore.sortRows`, wrapped by the harness before `content.js` captures the
+  namespace — `getVisibleRows()` is the only caller, so the call count *is* the number
+  of visible-rows passes per render. It must be `1`, not `2`/`3`. Also asserts the
+  search box keeps a trailing space and that filtering still trims;
+- stale cache: aging the persisted analysis entries by 10 minutes and reopening the
+  page must still show the rows, add a `有效期` notice to the status line, switch the
+  calculate button to `重新计算`, and issue **no** `/offers` request on its own;
+- failed-item retry: one item's `/offers` is made to throw; the retry button must
+  appear with a count of `1`, the failing item must be absent from the table, and
+  clicking retry must touch **only** that item (asserted on the item names in the
+  retried requests, not on a request count, because `fetchAllOffers` pages).
+- calculation scope: with a 12-item fixture whose unit-profit order is deliberately
+  the *reverse* of its name order, scoping to `filtered` with a limit of `5` must
+  request offers for `矿石12…矿石08` and **not** for `矿石01…矿石05` — that mismatch is
+  what makes the assertion able to tell "picked by unit profit" apart from "picked by
+  name". Also covers the fallback when the sort column has no values yet (total-profit
+  mode), the button label carrying the row count, the limit box being disabled outside
+  `filtered`, the scope shrinking to 3 rows when a search narrows the filter below the
+  limit, and the two error paths (`0` and `> max`) rolling back explicitly.
 
 If `jsdom` cannot be resolved, the script exits with code 2 and a hint. You can
 also point `NODE_PATH` at any `node_modules` that contains it.
@@ -67,7 +88,13 @@ only defines helpers:
 
 - `window.__mpeBoot()` — injects the styles and evaluates the extension sources,
   with `chrome.storage.local` backed by an in-memory object so nothing persists;
-- `window.__mpeFetchLog` — every request the page or the extension made.
+- `window.__mpeFetchLog` — every request the page or the extension made;
+- `window.__mpeOriginalFetch` — the untouched `fetch`, kept reachable so a driver can
+  opt out of the `/items` rewrite (see `run-perf.js`). The rewrite replaces the
+  response body with `{ total: items.length, items }` so drivers never wait on 82
+  pages, which also means every driver except `run-perf.js` sees a 100-item mall.
+  `run-scope.js` keeps the rewrite on purpose — it needs the scoped and unscoped runs
+  to differ visibly, not a realistic dataset size.
 
 The extension is injected this way rather than loaded as a real extension
 because `--extension` makes `agent-browser` navigate the target tab to
@@ -186,12 +213,93 @@ agent-browser eval 'JSON.stringify(window.__R)'
 more than 120 rows the driver narrows the table through the search box first,
 purely to keep the re-render fast.
 
+### 2.6 Run the render-efficiency driver
+
+```bash
+agent-browser open https://mall.vesego.xyz/mall --init-script tools/e2e/inject.js
+agent-browser set viewport 1600 900
+agent-browser wait 9000
+agent-browser eval "$(cat tools/e2e/run-perf.js)"
+
+# the driver pauses at phase "measured" for a screenshot:
+agent-browser screenshot ./perf.png
+agent-browser eval 'window.__MPE_CONTINUE = true; "go"'
+# ...poll until phase "done", then:
+agent-browser eval 'JSON.stringify(window.__R)'
+```
+
+This is the only place where the debounce can be measured honestly, because it needs
+real timers and the real dataset. It counts `#mpe-tbody` rebuilds with a
+`MutationObserver` instead of trusting a clock, types a real item-name prefix one
+character every 60ms, and reads:
+
+| Field | Must be |
+| --- | --- |
+| `fetchMode` / `probeTotal` | `original-fetch-restored` / `8230` — the driver must first undo the harness's `/items` rewrite, otherwise every number below is measured against a 100-item mall |
+| `rebuildsWhileTyping` | `0` — no rebuild happens during the burst |
+| `rebuildsAfterSettle` | `1` — exactly one, after it settles |
+| `settleDelayMs` | ~`222` — the wait matches the 220ms debounce window |
+| `singleKeystrokeRebuilds` / `singleKeystrokeDelayMs` | `1` / ~`222` |
+| `headerRenderMs` / `msPerRow` | cost of one full render and per rendered row |
+| `statCount` vs `rowCountAfterSort` | must match — summary and table share one visible-rows pass |
+| `retryHidden` / `errorText` | `true` / `""` |
+
+Note that `rebuildsAfterHeaderClick`-style counts read synchronously right after a
+click are always `0`: `MutationObserver` callbacks are microtasks, so the count only
+catches up after a tick. `headerRenderMs` is still valid because `render()` is
+synchronous.
+
+### 2.7 Run the calculation-scope driver
+
+```bash
+agent-browser open https://mall.vesego.xyz/mall --init-script tools/e2e/inject.js
+agent-browser set viewport 1600 900
+agent-browser wait 9000
+agent-browser eval "$(cat tools/e2e/run-scope.js)"
+
+# the driver pauses at phase "measured" for a screenshot:
+agent-browser screenshot ./scope-panel.png
+agent-browser eval 'window.__MPE_CONTINUE = true; "go"'
+# ...poll until phase "measured", then:
+agent-browser eval 'JSON.stringify(window.__R)'
+```
+
+`run-scope.js` wraps `window.fetch` to record *which item names* were asked for
+`/offers` — item names, not a request count, because the endpoint pages. It switches
+the anomaly filter off to learn the full row count, points the scope at `filtered`
+with a limit of `3`, switches the filter back on and clicks calculate:
+
+| Field | Observed |
+| --- | --- |
+| `scopeOptions` / `defaultScope` | `["all","filtered"]` / `all` |
+| `limitDisabledAtAll` / `limitDisabledAtFiltered` | `true` / `false` |
+| `limitMaxAttribute` / `limitPlaceholder` | `3000` / `100` — injected from `CONFIG`, not duplicated in the HTML |
+| `totalRows` | `38` — positive-profit rows out of the 100-item fixture |
+| `buttonScoped` | `开始计算（3 条）` |
+| `touchedItemCount` / `touchedNames` | `3` / the three names the scope picked |
+| `rowsAfterScopedRun` / `statCount` | `3` / `3` |
+| `statusNote` | starts with `计算范围：当前筛选结果的前 3 条` |
+| `buttonBackToAll` | `重新计算（38 条）` |
+
+Unlike `run-perf.js`, this driver deliberately keeps the harness's `/items` rewrite: it
+is not measuring cost, it only needs a dataset where "scoped to 3" and "scoped to all"
+differ visibly, and 100 items (38 rows) is plenty.
+
 ## Gotchas that cost time
 
 - **`inject.js` only defines hooks — it does not inject anything by itself.** Every
   driver must call `window.__mpeBoot()` as its first step (it returns `'booted'`,
   `'already'`, `'failed'` or `'no-boot-hook'`). Skip it and the page simply has no
   `#mpe-root`, which looks like "the panel never opened" rather than an error.
+- **Never pipe `agent-browser` output into another command inside a chained driver
+  run.** `agent-browser open ... | tail -3` kills the whole script: empty stdout, exit
+  code 1, `SIGTERM`, no error text — indistinguishable from "the page never loaded".
+  Redirect to `/dev/null` or a file instead. Also separate the steps with `;` rather
+  than `&&`, because `agent-browser eval` exits 1 whenever the expression evaluates to
+  a falsy value (an IIFE driver returns `undefined`), which would abort an `&&` chain.
+- **The scope-limit box listens on `change`, not `input`.** Typing a value without
+  blurring never commits it, and a driver that dispatches only `input` will silently
+  measure the default limit of 100 instead of the value it thought it set.
 - **The mall's item detail is a body-level modal.** Clicking a row inserts
   `body > div[role="dialog"][data-slot="dialog-content"][data-state="open"]`
   (radix, `w-[calc(100%-2rem)]` centered with `left-1/2 -translate-x-1/2`) plus a
@@ -220,3 +328,20 @@ purely to keep the re-render fast.
   sidestep Windows encoding issues.
 - **`agent-browser eval` fails on a falsy result** (exit code 1). Return a string
   such as `'ok'` from setup evals.
+- **`inject.js` rewrites the `/items` response to a single page.** It returns
+  `{ total: items.length, items }`, so the extension reads 100 items instead of the
+  real 8230 and the table holds 38 rows instead of 430. That is deliberate (no driver
+  wants to wait on 82 pages) but it silently invalidates any measurement of cost, and
+  it cost real time chasing a phantom "the extension only reads 100 items" bug. Use
+  `window.__mpeOriginalFetch` when the catalogue size matters.
+- **An `about:blank` iframe does not give you a clean realm.** `iframe.contentWindow.fetch`
+  returns the *parent's* patched `fetch` — the same intrinsics — so "get a native fetch
+  from an iframe" silently does nothing. Expose the original from the injection script
+  instead.
+- **Reading a count right after an action misses `MutationObserver` updates.** The
+  observer callback runs as a microtask, so `rebuilds` is still the old value on the
+  next line. `await` a tick before asserting.
+- **Check what the harness fakes before blaming the extension.** Two separate "bugs"
+  in this session (100 items instead of 8230, and a request count of 4 instead of 2)
+  were both the harness, not the extension: the `/items` rewrite, and a paginating
+  `fetchAllOffers` against a fixture that reports `total: 2` but returns one offer.
