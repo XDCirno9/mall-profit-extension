@@ -273,7 +273,7 @@ with a limit of `3`, switches the filter back on and clicks calculate:
 | --- | --- |
 | `scopeOptions` / `defaultScope` | `["all","filtered"]` / `all` |
 | `limitDisabledAtAll` / `limitDisabledAtFiltered` | `true` / `false` |
-| `limitMaxAttribute` / `limitPlaceholder` | `3000` / `100` — injected from `CONFIG`, not duplicated in the HTML |
+| `limitMaxAttribute` / `limitPlaceholder` | `3000` / `100` — injected from `CONFIG`, not duplicated in the HTML. The box itself is `hidden`: a fixed limit of 100 is what the feature is actually used with, and `.mpe-field{display:grid}` outranks the UA `[hidden]` rule, so hiding it also needs `.mpe-field[hidden]{display:none}` |
 | `totalRows` | `38` — positive-profit rows out of the 100-item fixture |
 | `buttonScoped` | `开始计算（3 条）` |
 | `touchedItemCount` / `touchedNames` | `3` / the three names the scope picked |

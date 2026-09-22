@@ -956,6 +956,10 @@ async function scenarioScopeLimitedCalculation() {
       && limit().disabled === true
       && calcButtonText(dom) === `开始计算（${SCOPE_ITEMS.length} 条）`,
     `scope=${scope().value} disabled=${limit().disabled} button=${calcButtonText(dom)}`);
+  // 条数上限固定 100：控件不能暴露给用户，但逻辑与校验保留在代码里
+  record('计算范围：条数上限控件不对用户暴露',
+    document.getElementById('mpe-scope-limit-field').hidden === true,
+    `hidden=${document.getElementById('mpe-scope-limit-field').hidden}`);
 
   commitChange(dom, 'mpe-calc-scope', 'filtered');
   commitChange(dom, 'mpe-scope-limit', '5');

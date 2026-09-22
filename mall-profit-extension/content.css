@@ -336,6 +336,11 @@
   width: 96px;
 }
 
+/* .mpe-field 自己声明了 display: grid，会盖过 UA 样式的 [hidden]{display:none}，得补一条 */
+.mpe-field[hidden] {
+  display: none;
+}
+
 /* 条数上限只在「当前筛选结果」范围下生效，另外两种范围里整块置灰，
    别让用户以为在「全部商品」下填的数字也在起作用 */
 .mpe-field[data-disabled="true"] {

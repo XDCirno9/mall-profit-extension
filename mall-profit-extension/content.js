@@ -222,7 +222,9 @@
               </select>
             </label>
 
-            <label class="mpe-field mpe-scope-limit-field" id="mpe-scope-limit-field">
+            <!-- 条数上限固定 100，不暴露给用户：可自定义对实际使用没什么价值。
+                 逻辑与校验都保留着，需要时去掉 hidden 就能恢复。 -->
+            <label class="mpe-field mpe-scope-limit-field" id="mpe-scope-limit-field" hidden>
               <span>条数上限</span>
               <input id="mpe-scope-limit" type="number" min="1" step="1" inputmode="numeric">
             </label>
