@@ -22,10 +22,18 @@ npm i -D jsdom          # once; jsdom is intentionally not a project dependency
 node tools/e2e/jsdom-harness.js
 ```
 
-Prints `PASS`/`FAIL` per assertion and `n/24 通过` at the end. Covers:
+Prints `PASS`/`FAIL` per assertion and `n/37 通过` at the end. Covers:
 
-- fast path: row already rendered, search box untouched;
-- search path: search box written, row found, panel closed, name kept in the box;
+- fast path: row already rendered, search box untouched, panel stays open docked;
+- search path: search box written, row found, name kept in the box;
+- docked mode: `data-dock="true"`, `html.mpe-dock`, backdrop hidden, scroll not
+  locked, the enlarge button appears, the status line says so;
+- undock: the enlarge button restores the overlay and never closes the mall detail;
+- opt-out: clearing the footer checkbox restores the old "close the panel" behaviour
+  and is written to `chrome.storage.local`;
+- narrow window: under 900px the jump closes the panel again;
+- Escape: while a mall dialog is open the panel survives; once it is gone, Escape
+  closes the panel and clears the dock state;
 - exact matching: `圆石` does not select `石头` or `黄铁矿`;
 - regression: the jump works from the root path `/` too, not just `/mall`;
 - failure paths: item absent, table present but search box missing, page with no
@@ -88,7 +96,8 @@ The result object answers, for the chosen target:
 | Field | Meaning |
 | --- | --- |
 | `target`, `targetInMallListBefore` | what the driver picked, and why |
-| `panelClosed` | the panel closed by itself |
+| `panelSettled` / `panelDockAfter` | the panel stayed open and docked |
+| `overlapWidth` / `mallDialogFound` | the mall detail must not sit under the panel |
 | `errorText` | must be empty |
 | `statusNote` | the user-visible confirmation |
 | `newFetches` / `offersRequests` | an `/offers` request proves the mall detail opened |
@@ -96,7 +105,29 @@ The result object answers, for the chosen target:
 | `searchBoxAfter` | `""` on the fast path; the item name on the search path |
 | `highlightSeenDuringJump` / `highlightSeenAfter` | `.mpe-jump-target` was applied |
 
-### 2.3 Run the port-manager driver
+### 2.3 Run the side-by-side driver
+
+```bash
+agent-browser open https://mall.vesego.xyz/mall --init-script tools/e2e/inject.js
+agent-browser set viewport 1600 900
+agent-browser wait 9000
+agent-browser eval "$(cat tools/e2e/run-dock.js)"
+
+# the driver pauses at phase "docked" so you can look at the page:
+agent-browser screenshot ./docked.png
+agent-browser eval 'window.__MPE_CONTINUE = true; "go"'
+
+# ...poll until phase "done", then:
+agent-browser eval 'JSON.stringify(window.__R)'
+```
+
+`run-dock.js` is the only place that can prove the geometry, because it needs a
+real layout engine. The key fields are `overlapWidth` (must be `0`), `gapBetween`,
+`panelRect` vs `dialogRect`, and the `esc*` fields: `esc1PanelOpen` must stay
+`"true"` while the mall dialog is open, and `esc2PanelOpen` must become `"false"`
+once it is gone.
+
+### 2.4 Run the port-manager driver
 
 ```bash
 agent-browser open https://mall.vesego.xyz/mall --init-script tools/e2e/inject.js
@@ -112,6 +143,13 @@ current selection, and that a well-formed export imports cleanly.
 
 ## Gotchas that cost time
 
+- **The mall's item detail is a body-level modal.** Clicking a row inserts
+  `body > div[role="dialog"][data-slot="dialog-content"][data-state="open"]`
+  (radix, `w-[calc(100%-2rem)]` centered with `left-1/2 -translate-x-1/2`) plus a
+  full-screen `[data-slot="dialog-overlay"]`, and sets `body{overflow:hidden}`.
+  It covers ~the whole viewport, so a panel left open on top of it hides the detail
+  completely — that is why the panel has to shrink and the modal has to be pushed
+  aside via CSS. Match it by `data-slot`, not by radix's generated `#radix-_r_N_` id.
 - **Never gate the jump on `location.pathname`.** The mall serves the same SPA shell
   on `/`, `/mall`, `/mall/` and even unknown paths, so any path check rejects real
   users. Detect the mall by its DOM — the item table whose `thead` contains `物品名`,

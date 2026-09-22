@@ -162,11 +162,12 @@
       if (document.querySelectorAll('.mpe-jump-target').length > 0) highlightSeen = true;
     }, 25);
 
+    // 跳转后要么进入并排模式（默认），要么在窄窗口 / 用户关掉开关时关闭面板
     return waitFor(function () {
       var p = document.getElementById('mpe-panel');
-      return p && p.dataset.open === 'false';
-    }, 25000, 50).then(function (closed) {
-      R.panelClosed = !!closed;
+      return p && (p.dataset.dock === 'true' || p.dataset.open === 'false');
+    }, 25000, 50).then(function (settled) {
+      R.panelSettled = !!settled;
       R.highlightSeenDuringJump = highlightSeen;
       clearInterval(hl);
       return sleep(1600);
@@ -175,6 +176,16 @@
     if (R.phase !== 'running') return null;
     R.highlightSeenAfter = document.querySelectorAll('.mpe-jump-target').length > 0;
     R.panelOpenAfter = document.getElementById('mpe-panel').dataset.open;
+    R.panelDockAfter = document.getElementById('mpe-panel').dataset.dock;
+    R.htmlDockAfter = document.documentElement.classList.contains('mpe-dock');
+    R.backdropHiddenAfter = document.getElementById('mpe-backdrop').hidden;
+    var dlg = document.querySelector('body > [data-slot="dialog-content"], body > [role="dialog"]:not([id^="mpe-"])');
+    R.mallDialogFound = !!dlg;
+    if (dlg) {
+      var pr = document.getElementById('mpe-panel').getBoundingClientRect();
+      var dr = dlg.getBoundingClientRect();
+      R.overlapWidth = Math.max(0, Math.min(pr.right, dr.right) - Math.max(pr.left, dr.left));
+    }
     R.errorText = note('mpe-error');
     R.statusNote = note('mpe-status-note');
     R.mallRowCountAfter = mallRowNames().length;

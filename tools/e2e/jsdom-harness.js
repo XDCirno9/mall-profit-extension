@@ -93,12 +93,28 @@ function buildMallDom(dom, initialItems) {
       .join('');
   }
 
+  let dialog = null;
+
+  // 真实的商城详情是挂在 body 下的模态框（data-slot="dialog-content"），照样复刻，
+  // 用来验证并排模式下插件不去压暗/锁住商城，以及 Esc 该归谁
+  function ensureDialog() {
+    if (dialog) return dialog;
+    dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('data-slot', 'dialog-content');
+    dialog.setAttribute('data-state', 'open');
+    dialog.appendChild(detail);
+    document.body.appendChild(dialog);
+    return dialog;
+  }
+
   // 忠实复现商城：真实 React onClick 挂在根节点，靠冒泡的 click 触发
   root.addEventListener('click', (event) => {
     const row = event.target.closest && event.target.closest('tr[data-name]');
     if (!row) return;
     clickedNames.push(row.dataset.name);
     detail.textContent = `物品报价 · ${row.dataset.name}`;
+    ensureDialog();
   });
 
   // 忠实复现商城：受控 input，服务端搜索
@@ -115,7 +131,21 @@ function buildMallDom(dom, initialItems) {
 
   renderRows(initialItems);
 
-  return { tbody, search, detail, clickedNames, searchHistory, renderRows };
+  return {
+    tbody,
+    search,
+    detail,
+    clickedNames,
+    searchHistory,
+    renderRows,
+    get dialog() { return dialog; },
+    // 模拟用户关掉商城详情
+    closeDialog() {
+      if (!dialog) return;
+      dialog.remove();
+      dialog = null;
+    }
+  };
 }
 
 async function createExtensionDom(url) {
@@ -180,7 +210,21 @@ async function createExtensionDom(url) {
   });
   await waitFor(() => dom.window.document.getElementById('mpe-launcher'), '扩展面板注入');
 
+  dom.__store = store;
   return dom;
+}
+
+function setViewport(dom, width, height) {
+  try {
+    dom.window.resizeTo(width, height);
+  } catch (error) {
+    // 忽略：下面兜底
+  }
+  if (dom.window.innerWidth !== width) {
+    Object.defineProperty(dom.window, 'innerWidth', { value: width, configurable: true });
+    Object.defineProperty(dom.window, 'innerHeight', { value: height, configurable: true });
+  }
+  return dom.window.innerWidth;
 }
 
 async function openPanelOnly(dom) {
@@ -218,6 +262,19 @@ function statusNote(dom) {
   return dom.window.document.getElementById('mpe-status-note').textContent;
 }
 
+function dockState(dom) {
+  const document = dom.window.document;
+  return {
+    open: panelOpen(dom),
+    dock: document.getElementById('mpe-panel').dataset.dock,
+    htmlDock: document.documentElement.classList.contains('mpe-dock'),
+    backdropHidden: document.getElementById('mpe-backdrop').hidden,
+    undockHidden: document.getElementById('mpe-undock').hidden,
+    scrollLocked: document.documentElement.classList.contains('mpe-panel-open'),
+    keepPanelChecked: document.getElementById('mpe-keep-panel').checked
+  };
+}
+
 function clickItemName(dom, itemName) {
   const document = dom.window.document;
   const buttons = [...document.querySelectorAll('#mpe-tbody button[data-mpe-item]')];
@@ -247,7 +304,16 @@ async function scenarioFastPath() {
   record('快路径：不修改商城搜索框',
     mall.search.value === '' && mall.searchHistory.length === 0,
     `search="${mall.search.value}" history=${JSON.stringify(mall.searchHistory)}`);
-  record('快路径：跳转成功后关闭面板', panelOpen(dom) === false);
+  const dock = dockState(dom);
+  record('快路径：跳转后面板保持打开，不再自动关闭',
+    dock.open === true && dock.dock === 'true', JSON.stringify(dock));
+  record('快路径：进入并排模式，并给商城模态框腾出右侧空间',
+    dock.htmlDock === true, JSON.stringify(dock));
+  record('快路径：并排模式下不再用遮罩压暗商城、也不锁页面滚动',
+    dock.backdropHidden === true && dock.scrollLocked === false, JSON.stringify(dock));
+  record('快路径：头部出现「展开面板」按钮', dock.undockHidden === false, JSON.stringify(dock));
+  record('快路径：状态栏说明面板保持打开',
+    statusNote(dom).includes('面板保持打开'), statusNote(dom));
   record('快路径：商城详情显示该物品',
     mall.detail.textContent.includes('石头'), mall.detail.textContent);
   dom.window.close();
@@ -267,7 +333,8 @@ async function scenarioSearchPath() {
     mall.clickedNames.includes('钻石'), `clicked=${JSON.stringify(mall.clickedNames)}`);
   record('搜索路径：搜索框保留物品名便于继续查看',
     mall.search.value === '钻石', `search="${mall.search.value}"`);
-  record('搜索路径：跳转后关闭面板', panelOpen(dom) === false);
+  record('搜索路径：跳转后面板同样保持打开（并排模式）',
+    panelOpen(dom) === true && dockState(dom).dock === 'true', JSON.stringify(dockState(dom)));
   dom.window.close();
 }
 
@@ -331,7 +398,8 @@ async function scenarioRootPathAlsoWorks() {
 
   record('回归：从根路径 `/` 进入商城也能跳转',
     mall.clickedNames.includes('石头'), `clicked=${JSON.stringify(mall.clickedNames)}`);
-  record('回归：根路径跳转后面板自动关闭', panelOpen(dom) === false);
+  record('回归：根路径跳转后面板保持打开（并排模式）',
+    panelOpen(dom) === true && dockState(dom).dock === 'true', JSON.stringify(dockState(dom)));
   record('回归：根路径跳转不报错', errorText(dom) === '', errorText(dom));
   record('回归：根路径跳转不碰搜索框',
     mall.search.value === '' && mall.searchHistory.length === 0,
@@ -406,9 +474,100 @@ async function scenarioManualCalculationStillManual() {
   dom.window.close();
 }
 
+// 并排模式可以随时退出：点「展开面板」回到原来的全屏浮层
+async function scenarioUndockRestoresPanel() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
+  const mall = buildMallDom(dom, ITEMS);
+  await openPanelAndLoad(dom);
+
+  clickItemName(dom, '石头');
+  await waitFor(() => dockState(dom).dock === 'true', '进入并排模式', 4000);
+
+  dom.window.document.getElementById('mpe-undock').click();
+  await sleep(60);
+
+  const dock = dockState(dom);
+  record('并排退出：点「展开面板」后回到浮层模式',
+    dock.open === true && dock.dock === 'false' && dock.htmlDock === false, JSON.stringify(dock));
+  record('并排退出：恢复遮罩与页面滚动锁',
+    dock.backdropHidden === false && dock.scrollLocked === true, JSON.stringify(dock));
+  record('并排退出：商城详情仍开着，不被插件关掉', Boolean(mall.dialog), `dialog=${Boolean(mall.dialog)}`);
+  dom.window.close();
+}
+
+// 页脚的开关可以让整个行为退回「跳转即关闭面板」
+async function scenarioKeepPanelDisabledClosesPanel() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
+  buildMallDom(dom, ITEMS);
+  await openPanelAndLoad(dom);
+
+  const toggle = dom.window.document.getElementById('mpe-keep-panel');
+  toggle.checked = false;
+  toggle.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await sleep(40);
+
+  record('可关闭：取消勾选本身不会收起面板', panelOpen(dom) === true);
+
+  clickItemName(dom, '石头');
+  await sleep(200);
+
+  record('可关闭：关掉选项后跳转回到「自动关闭面板」的老行为',
+    panelOpen(dom) === false, JSON.stringify(dockState(dom)));
+  record('可关闭：勾选状态写入本地存储',
+    Boolean(dom.__store['mallProfit.prefs.v1']) && dom.__store['mallProfit.prefs.v1'].keepPanelOnJump === false,
+    JSON.stringify(dom.__store['mallProfit.prefs.v1']));
+  dom.window.close();
+}
+
+// 窄窗口左右并排没有意义，应退回「跳转即关闭面板」
+async function scenarioNarrowWindowClosesPanel() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
+  buildMallDom(dom, ITEMS);
+  await openPanelAndLoad(dom);
+
+  assert.equal(setViewport(dom, 800, 700), 800, '前置条件：jsdom 视口宽度应能被改小');
+
+  clickItemName(dom, '石头');
+  await sleep(200);
+
+  record('窄窗口：视口不足 900px 时退回「跳转即关闭面板」',
+    panelOpen(dom) === false, JSON.stringify(dockState(dom)));
+  dom.window.close();
+}
+
+// Esc 冲突：并排模式下商城的详情也开着，Esc 该关详情而不是连面板一起关
+async function scenarioEscapeBelongsToMallDialog() {
+  const dom = await createExtensionDom('https://mall.vesego.xyz/mall');
+  const mall = buildMallDom(dom, ITEMS);
+  await openPanelAndLoad(dom);
+
+  clickItemName(dom, '石头');
+  await waitFor(() => dockState(dom).dock === 'true', '进入并排模式', 4000);
+
+  const press = () => dom.window.document.dispatchEvent(
+    new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+  );
+
+  press();
+  await sleep(60);
+  record('Esc 归属：商城详情开着时按 Esc 不会连带关掉利润面板',
+    panelOpen(dom) === true && dockState(dom).dock === 'true', JSON.stringify(dockState(dom)));
+
+  mall.closeDialog();
+  press();
+  await sleep(60);
+  record('Esc 归属：详情关掉后 Esc 正常关闭面板并解除并排状态',
+    panelOpen(dom) === false && dockState(dom).htmlDock === false, JSON.stringify(dockState(dom)));
+  dom.window.close();
+}
+
 (async () => {
   await scenarioFastPath();
   await scenarioSearchPath();
+  await scenarioUndockRestoresPanel();
+  await scenarioKeepPanelDisabledClosesPanel();
+  await scenarioNarrowWindowClosesPanel();
+  await scenarioEscapeBelongsToMallDialog();
   await scenarioNoSubstringMismatch();
   await scenarioNotFound();
   await scenarioMissingSearchBox();
