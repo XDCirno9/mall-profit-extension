@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "鸢尾花商城利润筛选器",
+  "version": "1.5.0",
+  "description": "筛选商城利润，支持异常价格、原版/非原版和港口黑名单，并可导入导出黑名单。",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://mall.vesego.xyz/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mall.vesego.xyz/*"
+      ],
+      "js": [
+        "profit-core.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
