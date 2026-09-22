@@ -23,9 +23,9 @@ const ITEMS = [
   { itemName: '黄铁矿', minSellPrice: 3, maxBuyPrice: 8, sellAmount: 700, sellOfferCount: 6, buyOfferCount: 5, totalOfferCount: 11, vanillaId: null }
 ];
 
-// 长夹具：验证「只算当前筛选结果的前 N 条」到底为哪几个商品拉过报价。
-// 单件利润随序号递增，所以「单件利润降序」挑出来的前几条是 矿石12…矿石08，
-// 而「按商品名升序」挑出来的是 矿石01…矿石05——两批完全不同，断言才有区分度。
+// 长夹具：验证「只算当前筛选结果」到底为哪几个商品拉过报价。
+// 名字带两位序号，搜索词「矿石1」只匹配得到 矿石10…矿石12（匹配不到 矿石01…矿石09），
+// 用它把范围从 12 条压到 3 条，断言才能看出请求集真的跟着筛选条件缩小了。
 const SCOPE_ITEMS = Array.from({ length: 12 }, (unused, index) => {
   const minSellPrice = 40 + index * 5;
   return {
@@ -39,9 +39,6 @@ const SCOPE_ITEMS = Array.from({ length: 12 }, (unused, index) => {
     vanillaId: index % 2 === 0 ? null : 'minecraft:stone'
   };
 });
-
-// 跟 content.js 的 CONFIG.maxScopeLimit 对齐，作为条数上限的契约写进断言
-const MAX_SCOPE_LIMIT = 3000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -383,13 +380,6 @@ function requestedOfferItems(dom) {
 function commitChange(dom, id, value) {
   const element = dom.window.document.getElementById(id);
   element.value = value;
-  element.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-}
-
-// 复选框要设 checked，不是 value
-function commitCheckbox(dom, id, checked) {
-  const element = dom.window.document.getElementById(id);
-  element.checked = checked;
   element.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
 }
 
@@ -948,95 +938,50 @@ async function scenarioRetryFailedItems() {
 
 // 计算范围（v1.10.0）：把范围收窄成「当前筛选结果的前 N 条」之后，
 // 只该为这 N 个商品拉报价，范围外的商品一个请求都不许发。
+// 计算范围（v1.10.0）：选「当前筛选结果」后，只有筛选出来的那部分商品会去拉报价。
 async function scenarioScopeLimitedCalculation() {
   const dom = await createExtensionDom('https://mall.vesego.xyz/mall', { items: SCOPE_ITEMS });
   buildMallDom(dom, SCOPE_ITEMS);
-  // 保持默认 10× 异常过滤：这样「点计算」才真的会去拉报价，正好用来数请求
+  // 保持默认 10x 异常过滤：这样「点计算」才真的会去拉报价，正好用来数请求
   await openPanelOnly(dom);
   const document = dom.window.document;
 
-  const scope = () => document.getElementById('mpe-calc-scope');
-  const limit = () => document.getElementById('mpe-scope-limit');
-
-  record('计算范围：默认算全部商品，按钮标出总条数，条数上限置灰',
-    scope().value === 'all'
-      && limit().disabled === true
+  record('计算范围：默认算全部商品，按钮标出条数',
+    document.getElementById('mpe-calc-scope').value === 'all'
       && calcButtonText(dom) === `开始计算（${SCOPE_ITEMS.length} 条）`,
-    `scope=${scope().value} disabled=${limit().disabled} button=${calcButtonText(dom)}`);
-  // 条数上限固定 100：控件不能暴露给用户，但逻辑与校验保留在代码里
-  record('计算范围：条数上限控件不对用户暴露',
-    document.getElementById('mpe-scope-limit-field').hidden === true,
-    `hidden=${document.getElementById('mpe-scope-limit-field').hidden}`);
+    `scope=${document.getElementById('mpe-calc-scope').value} button=${calcButtonText(dom)}`);
 
   commitChange(dom, 'mpe-calc-scope', 'filtered');
   await sleep(30);
-  record('计算范围：默认不套条数上限，算筛选结果的全部',
-    calcButtonText(dom) === `开始计算（${SCOPE_ITEMS.length} 条）`
-      && document.getElementById('mpe-scope-toggle').checked === false,
+  record('计算范围：切到当前筛选结果后算的是筛选结果的全部',
+    calcButtonText(dom) === `开始计算（${SCOPE_ITEMS.length} 条）`,
     `button=${calcButtonText(dom)}`);
 
-  commitCheckbox(dom, 'mpe-scope-toggle', true);
-  commitChange(dom, 'mpe-scope-limit', '5');
-  await sleep(30);
-
-  record('计算范围：勾上「只算前 N 条」后按钮只标这一轮的条数',
-    limit().disabled === false && calcButtonText(dom) === '开始计算（5 条）',
-    `disabled=${limit().disabled} button=${calcButtonText(dom)}`);
-
-  const firstBatch = ['矿石08', '矿石09', '矿石10', '矿石11', '矿石12'];
-  dom.__requests.length = 0;
-  document.getElementById('mpe-calculate').click();
-  await waitFor(() => rowNames(dom).length >= 5, '范围内的商品算完', 12000);
-
-  const touched = [...requestedOfferItems(dom)].sort();
-  record('计算范围：只为筛选结果里排最前面的 5 个商品拉报价，范围外一个请求都没发',
-    touched.length === 5 && firstBatch.every((name) => touched.includes(name)),
-    `touched=${touched.join(',')}`);
-  record('计算范围：表格里也只有这 5 条结果',
-    rowNames(dom).length === 5, `rows=${rowNames(dom).length}`);
-  record('计算范围：状态栏常驻说明这一轮只覆盖筛选结果的前几条',
-    statusNote(dom).includes('计算范围：当前筛选结果的前 5 条'), statusNote(dom));
-
-  // 总利润模式下排序键是 totalProfit-desc，但商品快照里 totalProfit 天生是 null，
-  // 按它排只会退化成按商品名。这时应当回退到单件利润降序挑前 5 条——
-  // 如果真按商品名挑，挑出来的会是 矿石01…矿石05，跟这里的断言正好对不上
-  document.querySelector('.mpe-segment[data-mode="total"]').click();
-  await sleep(30);
-  dom.__requests.length = 0;
-  document.getElementById('mpe-calculate').click();
-  await waitFor(() => requestedOfferItems(dom).size >= 5, '这一轮报价请求已发出', 12000);
-  await waitFor(() => calcButtonText(dom) !== '计算中…', '这一轮计算结束', 12000);
-
-  const totalTouched = [...requestedOfferItems(dom)].sort();
-  record('计算范围：排序键指向的列还没算出来时，按单件利润挑最前面的几条',
-    totalTouched.length === 5 && firstBatch.every((name) => totalTouched.includes(name)),
-    `touched=${totalTouched.join(',')}`);
-
-  commitChange(dom, 'mpe-calc-scope', 'all');
-  await sleep(30);
-  record('计算范围：切回全部商品后条数上限重新置灰，按钮恢复全量条数',
-    limit().disabled === true && calcButtonText(dom).includes(`（${SCOPE_ITEMS.length} 条）`),
-    `disabled=${limit().disabled} button=${calcButtonText(dom)}`);
-
-  // 范围要跟着搜索条件走：搜「矿石1」只剩 3 条，上限 5 条取不满，就按实际的 3 条算
-  commitChange(dom, 'mpe-calc-scope', 'filtered');
+  // 搜索把范围压到 3 条：只有这 3 个商品会去拉报价
   typeInto(dom, document.getElementById('mpe-search'), '矿石1');
   await sleep(INPUT_SETTLE_MS);
-  record('计算范围：上限超过筛选结果时按实际条数算，范围跟着搜索走',
-    calcButtonText(dom).includes('（3 条）'), calcButtonText(dom));
+  record('计算范围：范围跟着筛选条件走，按钮条数同步收窄',
+    calcButtonText(dom) === '开始计算（3 条）', calcButtonText(dom));
+  record('计算范围：状态栏常驻说明当前范围',
+    statusNote(dom).includes('计算范围：当前筛选结果（3 条）'), statusNote(dom));
 
-  // 非法输入必须显式报错并回滚到上一次的有效值，不做静默修改
-  commitChange(dom, 'mpe-scope-limit', '0');
-  await sleep(30);
-  record('计算范围：条数上限非法值显式报错并回滚',
-    errorText(dom).includes('条数上限') && limit().value === '5',
-    `error="${errorText(dom)}" value=${limit().value}`);
+  dom.__requests.length = 0;
+  document.getElementById('mpe-calculate').click();
+  await waitFor(() => rowNames(dom).length >= 3, '范围内的商品算完', 12000);
 
-  commitChange(dom, 'mpe-scope-limit', String(MAX_SCOPE_LIMIT + 1));
-  await sleep(30);
-  record('计算范围：条数上限超过上限时夹到上限并说明',
-    errorText(dom).includes('上限') && limit().value === String(MAX_SCOPE_LIMIT),
-    `error="${errorText(dom)}" value=${limit().value}`);
+  const touched = [...requestedOfferItems(dom)].sort();
+  record('计算范围：只为筛选结果里的 3 个商品拉报价，其余一个请求都没发',
+    touched.length === 3 && ['矿石10', '矿石11', '矿石12'].every((name) => touched.includes(name)),
+    `touched=${touched.join(',')}`);
+  record('计算范围：表格里也只有这 3 条结果',
+    rowNames(dom).length === 3, `rows=${rowNames(dom).length}`);
+
+  // 清掉搜索：范围恢复全量，已经算好的 3 条结果不受影响
+  typeInto(dom, document.getElementById('mpe-search'), '');
+  await sleep(INPUT_SETTLE_MS);
+  record('计算范围：清掉搜索后范围恢复全量，已算好的结果不动',
+    calcButtonText(dom).includes(`（${SCOPE_ITEMS.length} 条）`) && rowNames(dom).length === 3,
+    `button=${calcButtonText(dom)} rows=${rowNames(dom).length}`);
 
   dom.window.close();
 }

@@ -22,8 +22,6 @@
   window.__R = R;
   R.phase = 'running';
 
-  var SCOPE_LIMIT = 3;
-
   function itemButtons() {
     return Array.prototype.slice.call(document.querySelectorAll('#mpe-tbody .mpe-item-link'));
   }
@@ -43,7 +41,12 @@
       }, step || 100);
     });
   }
-  // 下拉和数字框都靠 change 事件生效；受控 input 必须走原生 value setter
+  // 搜索框是受控 input 且监听 input 事件，必须走原生 value setter 再派发冒泡的 input
+  function setInput(el, value) {
+    var d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+    if (d && d.set) d.set.call(el, value); else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
   function setControl(el, value) {
     var proto = el.tagName === 'SELECT'
       ? window.HTMLSelectElement.prototype
@@ -77,12 +80,8 @@
     if (!launcher) { R.phase = 'no-launcher'; return null; }
     launcher.click();
     var scope = document.getElementById('mpe-calc-scope');
-    var limit = document.getElementById('mpe-scope-limit');
     R.scopeOptions = scope ? Array.prototype.map.call(scope.options, function (option) { return option.value; }) : null;
     R.defaultScope = scope ? scope.value : null;
-    R.limitDisabledAtAll = limit ? limit.disabled : null;
-    R.limitMaxAttribute = limit ? limit.getAttribute('max') : null;
-    R.limitPlaceholder = limit ? limit.getAttribute('placeholder') : null;
 
     // 先关掉异常过滤拿到完整行数：这样不用计算就有数据行，也才知道「全部商品」是多少条
     setControl(document.getElementById('mpe-anomaly-filter'), '0');
@@ -94,21 +93,19 @@
     R.totalRows = itemButtons().length;
     R.buttonAtAllScope = note('mpe-calculate');
 
-    // 收窄范围：只算当前筛选结果的前 3 条
+    // 收窄范围：只算「当前筛选结果」，再搜第一个字把结果压到少数几个商品，
+    // 这样「只算了这几个」和「算了全部 38 个」一眼能分开
     setControl(document.getElementById('mpe-calc-scope'), 'filtered');
-    // 「只算前 N 条」默认是关的，先记下这一档的按钮文案再打开它
-    R.toggleCheckedByDefault = document.getElementById('mpe-scope-toggle').checked;
-    R.buttonScopeAll = note('mpe-calculate');
-    var toggle = document.getElementById('mpe-scope-toggle');
-    toggle.checked = true;
-    toggle.dispatchEvent(new Event('change', { bubbles: true }));
-    setControl(document.getElementById('mpe-scope-limit'), String(SCOPE_LIMIT));
-    R.limitDisabledAtFiltered = document.getElementById('mpe-scope-limit').disabled;
+    R.searchTerm = (itemButtons()[0].getAttribute('data-mpe-item') || '').slice(0, 1);
+    setInput(document.getElementById('mpe-search'), R.searchTerm);
+    return sleep(600).then(function () {
+      R.filteredRows = itemButtons().length;
 
-    // 打开异常过滤：这样「开始计算」才真的会去拉报价，正好用来数它碰了几个商品
-    setControl(document.getElementById('mpe-anomaly-filter'), '10');
-    R.buttonScoped = note('mpe-calculate');
-    return waitFor(function () { return itemButtons().length === 0; }, 10000, 100);
+      // 打开异常过滤：这样「开始计算」才真的会去拉报价，正好用来数它碰了几个商品
+      setControl(document.getElementById('mpe-anomaly-filter'), '10');
+      R.buttonScoped = note('mpe-calculate');
+      return waitFor(function () { return itemButtons().length === 0; }, 10000, 100);
+    });
   }).then(function () {
     if (R.phase !== 'running') return null;
     var before = Object.keys(offersSeen).length;
@@ -132,7 +129,6 @@
     // 切回「全部商品」：范围限制解除，按钮重新标出全量条数
     setControl(document.getElementById('mpe-calc-scope'), 'all');
     R.buttonBackToAll = note('mpe-calculate');
-    R.limitDisabledBackToAll = document.getElementById('mpe-scope-limit').disabled;
     R.phase = 'measured';
   }).then(function () {
     if (R.phase !== 'measured') return null;

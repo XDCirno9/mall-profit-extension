@@ -18,8 +18,6 @@
     mallItemTableHeader: '物品名',
     highlightMs: 1800,
     inputDebounceMs: 220,
-    defaultScopeLimit: 100,
-    maxScopeLimit: 3000,
     defaultStatusNote: '忽略路程与运输成本 · 自动隐藏标记商店'
   });
 
@@ -92,9 +90,6 @@
     minSellAmount: 0,
     vanillaFilter: 'all',
     calcScope: 'all',
-    // 「只算前 N 条」开关：默认关，「当前筛选结果」范围就是筛选结果的全部
-    scopeLimitEnabled: false,
-    scopeLimit: 100,
     // 按钮上要显示「重新计算（N 条）」，但 setBusy 会在算报价时被调用上万次，
     // 所以这个数字只在 render 里算一次存下来，setBusy 只读它
     scopeTargetCount: 0,
@@ -135,14 +130,6 @@
   function syncInputValue(element, value) {
     if (!element || element === document.activeElement) return;
     if (element.value !== value) element.value = value;
-  }
-
-  // 条数上限既是安全阀也是输入校验。空值/负数/非数字统一回落到默认值，
-  // 超大值夹到上限——上限存在的意义就是别让一次「只算一点」变成一次全量计算。
-  function normalizeScopeLimit(value) {
-    const number = Math.floor(Number(value));
-    if (!Number.isFinite(number) || number <= 0) return CONFIG.defaultScopeLimit;
-    return Math.min(number, CONFIG.maxScopeLimit);
   }
 
   function createUI() {
@@ -216,24 +203,13 @@
               </select>
             </label>
 
+            <!-- 「当前筛选结果」= 筛选后的全部行，不再截断条数 -->
             <label class="mpe-field mpe-scope-field">
               <span>计算范围</span>
               <select id="mpe-calc-scope">
                 <option value="all">全部商品</option>
                 <option value="filtered">当前筛选结果</option>
               </select>
-            </label>
-
-            <!-- 默认算筛选结果的全部；勾上才限制成前 100 条。
-                 数字框的值固定为默认值，不暴露给用户，逻辑与校验都还留着，去掉 hidden 即可恢复。 -->
-            <label class="mpe-toggle" id="mpe-scope-toggle-field">
-              <input id="mpe-scope-toggle" type="checkbox">
-              <span>只算前 ${CONFIG.defaultScopeLimit} 条</span>
-            </label>
-
-            <label class="mpe-field mpe-scope-limit-field" id="mpe-scope-limit-field" hidden>
-              <span>条数上限</span>
-              <input id="mpe-scope-limit" type="number" min="1" step="1" inputmode="numeric">
             </label>
 
             <button class="mpe-button mpe-button-secondary" id="mpe-port-manager" type="button">港口黑名单 <span id="mpe-port-count">0</span></button>
@@ -337,10 +313,6 @@
       'mpe-vanilla-filter',
       'mpe-anomaly-filter',
       'mpe-calc-scope',
-      'mpe-scope-toggle',
-      'mpe-scope-toggle-field',
-      'mpe-scope-limit',
-      'mpe-scope-limit-field',
       'mpe-port-manager',
       'mpe-port-count',
       'mpe-retry',
@@ -376,9 +348,6 @@
     ];
 
     for (const id of ids) elements[id] = document.getElementById(id);
-    // 上限和默认条数只在 CONFIG 里留一份，不在 HTML 里再抄一遍，省得将来改了忘记同步
-    elements['mpe-scope-limit'].max = String(CONFIG.maxScopeLimit);
-    elements['mpe-scope-limit'].placeholder = String(CONFIG.defaultScopeLimit);
     bindEvents();
     render();
   }
@@ -428,36 +397,6 @@
     elements['mpe-calc-scope'].addEventListener('change', (event) => {
       state.calcScope = event.target.value === 'filtered' ? 'filtered' : 'all';
       state.error = '';
-      render();
-    });
-
-    elements['mpe-scope-toggle'].addEventListener('change', (event) => {
-      state.scopeLimitEnabled = event.target.checked;
-      state.error = '';
-      render();
-    });
-
-    // 条数上限按 change（失焦 / 回车）生效而不是 input：边打字边校验会把「1」这种中间态
-    // 判成合法值。非法输入一律回滚到上一次的有效值，并在错误条里说清楚，不做静默修改。
-    elements['mpe-scope-limit'].addEventListener('change', (event) => {
-      const raw = String(event.target.value).trim();
-      if (!raw) {
-        state.scopeLimit = CONFIG.defaultScopeLimit;
-        state.error = '';
-        render();
-        return;
-      }
-      const parsed = Math.floor(Number(raw));
-      if (!Number.isFinite(parsed) || parsed <= 0) {
-        state.error = `条数上限需要是大于 0 的整数，「${raw}」无效，已回退为 ${integerFormatter.format(state.scopeLimit)}。`;
-        event.target.value = String(state.scopeLimit);
-        render();
-        return;
-      }
-      state.error = parsed > CONFIG.maxScopeLimit
-        ? `条数上限最多 ${integerFormatter.format(CONFIG.maxScopeLimit)}，已按上限生效。`
-        : '';
-      state.scopeLimit = normalizeScopeLimit(parsed);
       render();
     });
 
@@ -1280,9 +1219,6 @@
       await loadMarket(false);
       if (!state.items.length) return;
     }
-    // 兜一下底：范围设置万一被别处写坏，也不能让它失控
-    state.scopeLimit = normalizeScopeLimit(state.scopeLimit);
-
     if (state.anomalyMultiplier > 0 || state.portBlacklist.length > 0) {
       await ensureAnomalyAnalysis(force, retryOnly);
       return;
@@ -1339,28 +1275,12 @@
     return state.unitRows.filter((row) => matchesFilter(row, search));
   }
 
-  // 「当前筛选结果」范围下真正要算的行：先筛选，再按当前排序键取最前面的 N 条。
-  // 商品快照里 totalProfit / matchedQty 天生是 null（要拉过报价才知道），所以总利润模式下
-  // 整列都拿不出值，按它排序会退化成「按商品名」——用户根本认不出最前面的 100 条是怎么挑的。
-  // 这时候回退到单件利润降序：单件利润内嵌在快照里，任何模式下都排得动，而且它就是插件
-  // 默认展示给用户的那个排名。判定用「有没有一行拿得出这个字段」，好让有值之后仍按用户选的排。
+  // 计算范围要算的行：默认全部正利润商品，选「当前筛选结果」就是筛选后的全部行。
+  // 不能拿 getVisibleRows() 当范围：计算前分析缓存是空的，异常过滤模式下绝大多数行会被判成
+  // 不可见，筛出来是 0 条。
   function getScopeTargets() {
-    const rows = getScopeRows();
-    // 没勾「只算前 N 条」时筛选结果全都要算，也就没必要为了挑前 N 条再排一次序
-    if (state.calcScope !== 'filtered' || !state.scopeLimitEnabled) return rows;
-    const field = Core.parseSortKey(state.sortKey).field;
-    const usable = rows.some((row) => row[field] !== null && row[field] !== undefined);
-    const ordered = Core.sortRows(rows, usable ? state.sortKey : MODE_DEFAULT_SORT.unit);
-    return ordered.slice(0, normalizeScopeLimit(state.scopeLimit));
-  }
-
-  // 按钮上的「（N 条）」只要知道要算多少条，不需要知道是哪几条，所以这里不排序：
-  // 取前 N 条的条数就是 min(筛选后行数, N)，而 setBusy 会在算报价时被调上万次，
-  // 能省掉一次 O(n log n) 就省掉。
-  function computeScopeTargetCount() {
-    if (state.calcScope !== 'filtered') return state.unitRows.length;
-    const count = getScopeRows().length;
-    return state.scopeLimitEnabled ? Math.min(count, normalizeScopeLimit(state.scopeLimit)) : count;
+    if (state.calcScope !== 'filtered') return state.unitRows;
+    return getScopeRows();
   }
 
   function getVisibleRows() {
@@ -1638,7 +1558,7 @@
     // 不要把 getVisibleRows() 分别写进两个子渲染里
     const rows = getVisibleRows();
     // 「开始计算（N 条）」里的 N 在这里算一次存进 state：setBusy 在算报价时会被调上万次，只读它
-    state.scopeTargetCount = computeScopeTargetCount();
+    state.scopeTargetCount = getScopeTargets().length;
     renderMode();
     renderStatus(rows);
     renderSummary(rows);
@@ -1651,17 +1571,7 @@
     elements['mpe-anomaly-filter'].value = String(state.anomalyMultiplier);
     // 条数上限只在「当前筛选结果」范围下有意义：其余范围里置灰并清空，让占位符露出默认值，
     // 否则用户会以为在「全部商品」下填的数字也生效
-    const scopeFiltered = state.calcScope === 'filtered';
     elements['mpe-calc-scope'].value = state.calcScope;
-    // 「只算前 N 条」只在「当前筛选结果」范围下有意义，其余范围置灰
-    elements['mpe-scope-toggle'].checked = state.scopeLimitEnabled;
-    elements['mpe-scope-toggle'].disabled = !scopeFiltered;
-    elements['mpe-scope-toggle-field'].dataset.disabled = String(!scopeFiltered);
-    elements['mpe-scope-toggle-field'].title = scopeFiltered ? '' : '仅「当前筛选结果」范围生效';
-    elements['mpe-scope-limit'].disabled = !scopeFiltered;
-    elements['mpe-scope-limit-field'].dataset.disabled = String(!scopeFiltered);
-    elements['mpe-scope-limit-field'].title = scopeFiltered ? '' : '仅「当前筛选结果」范围生效';
-    syncInputValue(elements['mpe-scope-limit'], scopeFiltered ? String(state.scopeLimit) : '');
     setBusy();
   }
 
@@ -1703,10 +1613,7 @@
         } else if (state.calcScope === 'filtered') {
           // 计算范围是常驻设置不是临时提醒，所以拼在常规说明前面但不打高亮标记。
           // 切回「全部商品」后这条会消失，而表里可能仍然只有上一轮算过的那部分结果。
-          const total = integerFormatter.format(state.scopeTargetCount);
-          note = state.scopeLimitEnabled
-            ? `计算范围：当前筛选结果的前 ${total} 条 · ${CONFIG.defaultStatusNote}`
-            : `计算范围：当前筛选结果的全部 ${total} 条 · ${CONFIG.defaultStatusNote}`;
+          note = `计算范围：当前筛选结果（${integerFormatter.format(state.scopeTargetCount)} 条） · ${CONFIG.defaultStatusNote}`;
         }
       }
       elements['mpe-status-note'].textContent = note;

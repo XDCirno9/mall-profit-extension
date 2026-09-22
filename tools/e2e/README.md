@@ -22,7 +22,7 @@ npm i -D jsdom          # once; jsdom is intentionally not a project dependency
 node tools/e2e/jsdom-harness.js
 ```
 
-Prints `PASS`/`FAIL` per assertion and `n/80 通过` at the end. Covers:
+Prints `PASS`/`FAIL` per assertion and `n/77 通过` at the end. Covers:
 
 - fast path: row already rendered, search box untouched, panel stays open on top of
   the mall detail, and the mall dialog is still a `body`-level child;
@@ -59,14 +59,11 @@ Prints `PASS`/`FAIL` per assertion and `n/80 通过` at the end. Covers:
   appear with a count of `1`, the failing item must be absent from the table, and
   clicking retry must touch **only** that item (asserted on the item names in the
   retried requests, not on a request count, because `fetchAllOffers` pages).
-- calculation scope: with a 12-item fixture whose unit-profit order is deliberately
-  the *reverse* of its name order, scoping to `filtered` with a limit of `5` must
-  request offers for `矿石12…矿石08` and **not** for `矿石01…矿石05` — that mismatch is
-  what makes the assertion able to tell "picked by unit profit" apart from "picked by
-  name". Also covers the fallback when the sort column has no values yet (total-profit
-  mode), the button label carrying the row count, the limit box being disabled outside
-  `filtered`, the scope shrinking to 3 rows when a search narrows the filter below the
-  limit, and the two error paths (`0` and `> max`) rolling back explicitly.
+- calculation scope: with a 12-item fixture, switching to `filtered` must calculate the
+  whole filter result; searching `矿石1` (which matches only `矿石10…矿石12`) must both
+  shrink the count on the calculate button and leave the other nine items' offers
+  endpoints untouched. Also covers the status-line wording, and that clearing the search
+  restores the full count without dropping the rows already computed.
 
 If `jsdom` cannot be resolved, the script exits with code 2 and a hint. You can
 also point `NODE_PATH` at any `node_modules` that contains it.
@@ -266,19 +263,19 @@ agent-browser eval 'JSON.stringify(window.__R)'
 
 `run-scope.js` wraps `window.fetch` to record *which item names* were asked for
 `/offers` — item names, not a request count, because the endpoint pages. It switches
-the anomaly filter off to learn the full row count, points the scope at `filtered`
-with a limit of `3`, switches the filter back on and clicks calculate:
+the anomaly filter off to learn the full row count, points the scope at `filtered`,
+types the first character of the top item's name to narrow the filter down, switches
+the filter back on and clicks calculate:
 
 | Field | Observed |
 | --- | --- |
 | `scopeOptions` / `defaultScope` | `["all","filtered"]` / `all` |
-| `limitDisabledAtAll` / `limitDisabledAtFiltered` | `true` / `false` |
-| `limitMaxAttribute` / `limitPlaceholder` | `3000` / `100` — injected from `CONFIG`, not duplicated in the HTML. The box itself is `hidden`: the cap is a fixed 100, and the `只算前 100 条` checkbox (default off) is what turns it on, so the value needs no user editing. `.mpe-field{display:grid}` outranks the UA `[hidden]` rule, so hiding it also needs `.mpe-field[hidden]{display:none}` |
 | `totalRows` | `38` — positive-profit rows out of the 100-item fixture |
-| `buttonScoped` | `开始计算（3 条）` |
-| `touchedItemCount` / `touchedNames` | `3` / the three names the scope picked |
-| `rowsAfterScopedRun` / `statCount` | `3` / `3` |
-| `statusNote` | starts with `计算范围：当前筛选结果的前 3 条` |
+| `searchTerm` / `filteredRows` | first character of the top item's name, and how many rows it matches |
+| `buttonScoped` | `开始计算（filteredRows 条）` |
+| `touchedItemCount` / `touchedNames` | `filteredRows` / only names from the filtered set |
+| `rowsAfterScopedRun` / `statCount` | `filteredRows` / same |
+| `statusNote` | starts with `计算范围：当前筛选结果（filteredRows 条）` |
 | `buttonBackToAll` | `重新计算（38 条）` |
 
 Unlike `run-perf.js`, this driver deliberately keeps the harness's `/items` rewrite: it
@@ -297,9 +294,6 @@ differ visibly, and 100 items (38 rows) is plenty.
   Redirect to `/dev/null` or a file instead. Also separate the steps with `;` rather
   than `&&`, because `agent-browser eval` exits 1 whenever the expression evaluates to
   a falsy value (an IIFE driver returns `undefined`), which would abort an `&&` chain.
-- **The scope-limit box listens on `change`, not `input`.** Typing a value without
-  blurring never commits it, and a driver that dispatches only `input` will silently
-  measure the default limit of 100 instead of the value it thought it set.
 - **The mall's item detail is a body-level modal.** Clicking a row inserts
   `body > div[role="dialog"][data-slot="dialog-content"][data-state="open"]`
   (radix, `w-[calc(100%-2rem)]` centered with `left-1/2 -translate-x-1/2`) plus a
