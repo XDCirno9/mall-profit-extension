@@ -11,7 +11,12 @@
     offerConcurrency: 4,
     cacheTtlMs: 5 * 60 * 1000,
     fetchRetries: 2,
-    maxOffers: 20000
+    maxOffers: 20000,
+    jumpTimeoutMs: 8000,
+    mallSearchPlaceholder: '搜索物品名',
+    mallItemTableHeader: '物品名',
+    highlightMs: 1800,
+    defaultStatusNote: '忽略路程与运输成本 · 自动隐藏标记商店'
   });
 
   const STORAGE_KEYS = Object.freeze({
@@ -58,6 +63,12 @@
     portError: '',
     offerErrors: new Set(),
     marketSavedAt: 0,
+    jumpBusy: '',
+    jumpNotice: '',
+    truncatedCount: 0,
+    storageWarning: '',
+    portNotice: '',
+    portRenderedSignature: '',
     mode: 'unit',
     sortKey: 'unitProfit-desc',
     search: '',
@@ -115,7 +126,7 @@
 
           <div class="mpe-status-line">
             <span id="mpe-data-status">尚未读取商城数据</span>
-            <span class="mpe-status-note">忽略路程与运输成本 · 自动隐藏标记商店</span>
+            <span class="mpe-status-note" id="mpe-status-note" data-notice="false">忽略路程与运输成本 · 自动隐藏标记商店</span>
           </div>
 
           <div class="mpe-toolbar">
@@ -202,7 +213,7 @@
           </div>
 
           <footer class="mpe-footer">
-            <span>数据来自商城的公开报价接口，仅按当前价格计算。</span>
+            <span>数据来自商城的公开报价接口，仅按当前价格计算 · 点击商品名称可跳到商城页面中的该物品详情</span>
             <span id="mpe-row-count"></span>
           </footer>
         </aside>
@@ -252,6 +263,7 @@
       'mpe-refresh',
       'mpe-close',
       'mpe-data-status',
+      'mpe-status-note',
       'mpe-sort',
       'mpe-search',
       'mpe-min-sell-amount',
@@ -339,6 +351,8 @@
     });
     elements['mpe-port-clear'].addEventListener('click', () => {
       state.draftPortBlacklist.clear();
+      state.portNotice = '';
+      state.portError = '';
       renderPortManager();
     });
     elements['mpe-port-save'].addEventListener('click', () => void savePortBlacklist());
@@ -352,8 +366,18 @@
       const port = checkbox.dataset.port;
       if (checkbox.checked) state.draftPortBlacklist.add(port);
       else state.draftPortBlacklist.delete(port);
-      renderPortManager();
+      // 只刷新计数，不重建列表，避免勾选时滚动位置被重置
+      const selectedCount = normalizePortNames([...state.draftPortBlacklist]).length;
+      elements['mpe-port-selected-count'].textContent = `已屏蔽 ${selectedCount} 个港口`;
     });
+    elements['mpe-tbody'].addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-mpe-item]');
+      if (!button) return;
+      event.preventDefault();
+      const itemName = button.dataset.mpeItem;
+      if (itemName) void jumpToMallItem(itemName);
+    });
+
     for (const button of document.querySelectorAll('.mpe-segment')) {
       button.addEventListener('click', () => setMode(button.dataset.mode));
     }
@@ -390,16 +414,25 @@
     state.draftPortBlacklist = new Set(normalizePortNames(state.portBlacklist));
     state.portSearch = '';
     state.portError = '';
+    state.portNotice = '';
+    state.portRenderedSignature = '';
     elements['mpe-port-search'].value = '';
     elements['mpe-port-modal'].hidden = false;
     renderPortManager();
     if (!state.availablePorts.length) void loadAvailablePorts(false);
+    window.requestAnimationFrame(() => {
+      if (!elements['mpe-port-modal'].hidden) elements['mpe-port-search'].focus();
+    });
   }
 
   function closePortManager() {
+    const wasOpen = !elements['mpe-port-modal'].hidden;
     elements['mpe-port-modal'].hidden = true;
     state.portError = '';
+    state.portNotice = '';
+    state.portRenderedSignature = '';
     renderPortManager();
+    if (wasOpen && elements['mpe-port-manager']) elements['mpe-port-manager'].focus();
   }
 
   function renderPortManager() {
@@ -419,16 +452,26 @@
       elements['mpe-port-status'].textContent = '正在读取港口列表…';
     } else if (state.portError) {
       elements['mpe-port-status'].textContent = state.portError;
+    } else if (state.portNotice) {
+      elements['mpe-port-status'].textContent = state.portNotice;
     } else {
       elements['mpe-port-status'].textContent = `共 ${names.length} 个港口，当前显示 ${visible.length} 个。`;
     }
 
-    elements['mpe-port-list'].innerHTML = visible.length
+    const signature = visible.join('\u0001');
+    const list = elements['mpe-port-list'];
+    const previousScrollTop = list.scrollTop;
+    const keepScroll = signature === state.portRenderedSignature;
+
+    list.innerHTML = visible.length
       ? visible.map((name) => {
         const checked = state.draftPortBlacklist.has(name) ? ' checked' : '';
         return `<label class="mpe-port-option"><input type="checkbox" data-port="${escapeHtml(name)}"${checked}><span>${escapeHtml(name)}</span></label>`;
       }).join('')
       : `<div class="mpe-port-empty">${state.portListLoading ? '正在读取港口列表…' : '没有匹配的港口'}</div>`;
+
+    state.portRenderedSignature = signature;
+    if (keepScroll) list.scrollTop = previousScrollTop;
   }
 
   async function loadAvailablePorts(force) {
@@ -439,9 +482,8 @@
     renderPortManager();
     try {
       const data = await apiGet('/ports?includeTagged=false');
-      state.availablePorts = normalizePortNames(
-        (Array.isArray(data.ports) ? data.ports : []).map((port) => port && port.portName)
-      );
+      const portList = requireArrayField(data, 'ports', '港口接口');
+      state.availablePorts = normalizePortNames(portList.map((port) => port && port.portName));
     } catch (error) {
       if (!isAbortError(error)) state.portError = `港口列表读取失败：${error.message || '未知错误'}`;
     } finally {
@@ -455,6 +497,8 @@
     if (!name) return;
     state.draftPortBlacklist.add(name);
     elements['mpe-port-add-input'].value = '';
+    state.portNotice = '';
+    state.portError = '';
     renderPortManager();
   }
 
@@ -481,19 +525,18 @@
     if (!file) return;
     try {
       const text = await file.text();
-      let ports = [];
-      try {
-        const parsed = JSON.parse(text);
-        ports = Array.isArray(parsed) ? parsed : parsed.ports;
-      } catch {
-        ports = text.split(/[\r\n,]+/);
-      }
-      state.draftPortBlacklist = new Set(normalizePortNames(ports));
+      const parsed = Core.parsePortBlacklistText(text);
+      if (!parsed.ok) throw new Error(parsed.error);
+      const ports = normalizePortNames(parsed.ports);
+      state.draftPortBlacklist = new Set(ports);
       state.portError = '';
+      state.portNotice = `已导入 ${ports.length} 个港口，点击“保存并关闭”后生效。`;
     } catch (error) {
+      state.portNotice = '';
       state.portError = `导入失败：${error.message || '文件格式不正确'}`;
     } finally {
       event.target.value = '';
+      state.portRenderedSignature = '';
       renderPortManager();
     }
   }
@@ -601,6 +644,17 @@
     throw lastError || new Error('商城接口请求失败');
   }
 
+  function requireArrayField(payload, field, label) {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error(`${label}返回格式异常（不是 JSON 对象）`);
+    }
+    const value = payload[field];
+    if (!Array.isArray(value)) {
+      throw new Error(`${label}缺少 ${field} 数组字段，商城接口可能已变更`);
+    }
+    return value;
+  }
+
   async function mapLimit(values, limit, worker, signal) {
     let nextIndex = 0;
 
@@ -629,7 +683,7 @@
 
   async function fetchMarketItems(signal) {
     const firstPage = await apiGet(buildItemsPath(0), signal);
-    const firstItems = Array.isArray(firstPage.items) ? firstPage.items : [];
+    const firstItems = requireArrayField(firstPage, 'items', '商品列表接口');
     const reportedTotal = Number(firstPage.total);
     const total = Number.isFinite(reportedTotal) && reportedTotal >= 0 ? reportedTotal : firstItems.length;
 
@@ -643,7 +697,7 @@
 
     await mapLimit(offsets, CONFIG.listConcurrency, async (offset) => {
       const page = await apiGet(buildItemsPath(offset), signal);
-      if (Array.isArray(page.items)) items.push(...page.items);
+      items.push(...requireArrayField(page, 'items', '商品列表接口'));
       completedPages += 1;
       updateProgress('正在读取商品列表', completedPages, totalPages);
     }, signal);
@@ -715,6 +769,7 @@
     let offset = 0;
     let total = Infinity;
     let guard = 0;
+    let truncated = false;
 
     while (offset < total && offers.length < CONFIG.maxOffers && guard < 250) {
       guard += 1;
@@ -725,7 +780,7 @@
         offset: String(offset)
       });
       const page = await apiGet(`/items/${encodeURIComponent(itemName)}/offers?${params.toString()}`, signal);
-      const pageOffers = Array.isArray(page.offers) ? page.offers : [];
+      const pageOffers = requireArrayField(page, 'offers', '报价接口');
       const reportedTotal = Number(page.total);
       if (Number.isFinite(reportedTotal) && reportedTotal >= 0) total = reportedTotal;
       if (!pageOffers.length) break;
@@ -733,7 +788,11 @@
       offset += pageOffers.length;
     }
 
-    return offers;
+    if (offers.length >= CONFIG.maxOffers || guard >= 250) {
+      truncated = Number.isFinite(total) ? offers.length < total : true;
+    }
+
+    return { offers, truncated };
   }
 
   function isFresh(timestamp) {
@@ -799,6 +858,7 @@
     const positiveRows = state.unitRows.length ? state.unitRows : Core.buildUnitRows(state.items);
     const missing = positiveRows.filter((row) => !hasFreshAnalysis(row.itemName));
     state.offerErrors.clear();
+    state.truncatedCount = 0;
 
     if (!missing.length) {
       state.offerLoading = false;
@@ -814,6 +874,7 @@
     state.offerController = offerController;
     let completed = positiveRows.length - missing.length;
     let writesSincePersist = 0;
+    let truncatedItems = 0;
     setBusy();
     render();
     updateProgress('正在过滤异常报价', completed, positiveRows.length);
@@ -821,11 +882,12 @@
     try {
       await mapLimit(missing, CONFIG.offerConcurrency, async (row) => {
         try {
-          const [buyOffers, sellOffers] = await Promise.all([
+          const [buyResult, sellResult] = await Promise.all([
             fetchAllOffers(row.itemName, 'buy', offerSignal),
             fetchAllOffers(row.itemName, 'sell', offerSignal)
           ]);
-          const analysis = Core.buildOfferAnalysis(buyOffers, sellOffers, multiplier, blacklist);
+          if (buyResult.truncated || sellResult.truncated) truncatedItems += 1;
+          const analysis = Core.buildOfferAnalysis(buyResult.offers, sellResult.offers, multiplier, blacklist);
           cache[row.itemName] = {
             ...analysis,
             multiplier,
@@ -856,6 +918,7 @@
       if (runId === state.offerRunId) hideProgress();
     } finally {
       if (runId === state.offerRunId) {
+        state.truncatedCount = truncatedItems;
         state.offerLoading = false;
         state.offerController = null;
         setBusy();
@@ -879,6 +942,7 @@
     const positiveRows = state.unitRows.length ? state.unitRows : Core.buildUnitRows(state.items);
     const missing = positiveRows.filter((row) => !hasFreshTotal(row.itemName));
     state.offerErrors.clear();
+    state.truncatedCount = 0;
 
     if (!missing.length) {
       state.offerLoading = false;
@@ -894,6 +958,7 @@
     state.offerController = offerController;
     let completed = positiveRows.length - missing.length;
     let writesSincePersist = 0;
+    let truncatedItems = 0;
     setBusy();
     render();
     updateProgress('正在计算总利润', completed, positiveRows.length);
@@ -901,11 +966,12 @@
     try {
       await mapLimit(missing, CONFIG.offerConcurrency, async (row) => {
         try {
-          const [buyOffers, sellOffers] = await Promise.all([
+          const [buyResult, sellResult] = await Promise.all([
             fetchAllOffers(row.itemName, 'buy', offerSignal),
             fetchAllOffers(row.itemName, 'sell', offerSignal)
           ]);
-          const result = Core.calculateMatchedProfit(buyOffers, sellOffers);
+          if (buyResult.truncated || sellResult.truncated) truncatedItems += 1;
+          const result = Core.calculateMatchedProfit(buyResult.offers, sellResult.offers);
           state.totalCache[row.itemName] = {
             ...result,
             updatedAt: Date.now()
@@ -935,6 +1001,7 @@
       if (runId === state.offerRunId) hideProgress();
     } finally {
       if (runId === state.offerRunId) {
+        state.truncatedCount = truncatedItems;
         state.offerLoading = false;
         state.offerController = null;
         setBusy();
@@ -1094,6 +1161,189 @@
     }).format(new Date(timestamp));
   }
 
+  let highlightedRow = null;
+  let highlightTimer = 0;
+
+  function isMallRoute() {
+    return /^\/mall(\/|$)/i.test(window.location.pathname || '');
+  }
+
+  function findMallItemTable() {
+    for (const table of document.querySelectorAll('table')) {
+      if (table.closest('#mpe-root')) continue;
+      const head = table.querySelector('thead');
+      if (head && head.textContent.includes(CONFIG.mallItemTableHeader)) return table;
+    }
+    return null;
+  }
+
+  function findLeafWithText(root, text) {
+    if (!root) return null;
+    if (!root.children.length) return root.textContent.trim() === text ? root : null;
+    for (const child of root.children) {
+      const match = findLeafWithText(child, text);
+      if (match) return match;
+    }
+    return null;
+  }
+
+  function findMallItemRow(itemName) {
+    const table = findMallItemTable();
+    if (!table) return null;
+    // 精确匹配整数个文本节点，避免「石头」误命中「圆石」
+    for (const row of table.querySelectorAll('tbody tr')) {
+      if (findLeafWithText(row, itemName)) return row;
+    }
+    return null;
+  }
+
+  function findMallSearchInput() {
+    const exact = document.querySelector(`input[placeholder="${CONFIG.mallSearchPlaceholder}"]`);
+    if (exact && !exact.closest('#mpe-root')) return exact;
+    for (const input of document.querySelectorAll('input')) {
+      if (input.closest('#mpe-root')) continue;
+      const placeholder = input.getAttribute('placeholder') || '';
+      if (placeholder.includes('物品')) return input;
+    }
+    return null;
+  }
+
+  function setNativeInputValue(input, value) {
+    const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+    if (descriptor && descriptor.set) descriptor.set.call(input, value);
+    else input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function waitForMallItemRow(itemName, timeoutMs) {
+    const immediate = findMallItemRow(itemName);
+    if (immediate) return Promise.resolve(immediate);
+
+    // 商城在搜索时会整表卸载再重挂，任何绑定在旧节点上的监听都会失效，
+    // 所以这里用轮询定位，不去依赖某个具体节点是否还挂在文档上。
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = 0;
+      let poll = 0;
+
+      const finish = (row) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        window.clearInterval(poll);
+        resolve(row);
+      };
+
+      const check = () => {
+        if (settled) return;
+        const row = findMallItemRow(itemName);
+        if (row) finish(row);
+      };
+
+      poll = window.setInterval(check, 120);
+      timer = window.setTimeout(() => finish(null), timeoutMs);
+    });
+  }
+
+  function scrollRowIntoView(row) {
+    if (typeof row.scrollIntoView !== 'function') return;
+    try {
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch {
+      try {
+        row.scrollIntoView();
+      } catch {
+        // 个别环境不支持 scrollIntoView，滚动失败不影响跳转本身
+      }
+    }
+  }
+
+  function clearHighlight() {
+    window.clearTimeout(highlightTimer);
+    highlightTimer = 0;
+    if (highlightedRow) {
+      highlightedRow.classList.remove('mpe-jump-target');
+      highlightedRow = null;
+    }
+  }
+
+  function activateMallRow(row, itemName) {
+    scrollRowIntoView(row);
+
+    // 商城的 onClick 挂在 React 根节点上，必须派发可冒泡的真实事件
+    row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+
+    // 搜索路径下商城会整表重挂，这里拿到的一定是新节点，高亮直接打在新节点上即可
+    clearHighlight();
+    row.classList.add('mpe-jump-target');
+    highlightedRow = row;
+    highlightTimer = window.setTimeout(() => {
+      if (highlightedRow === row) clearHighlight();
+    }, CONFIG.highlightMs);
+  }
+
+  async function jumpToMallItem(itemName) {
+    if (state.jumpBusy || !itemName) return;
+
+    state.error = '';
+    state.jumpNotice = '';
+
+    if (!isMallRoute()) {
+      state.error = '当前页不是商城首页（/mall），无法跳转到物品详情。';
+      render();
+      return;
+    }
+
+    state.jumpBusy = itemName;
+    renderStatus();
+
+    let searchInput = null;
+    let previousSearch = '';
+
+    try {
+      let row = findMallItemRow(itemName);
+
+      if (!row) {
+        searchInput = findMallSearchInput();
+        if (!searchInput) {
+          throw new Error('没有找到商城的物品搜索框，请确认商城页面已经完全加载');
+        }
+        previousSearch = searchInput.value;
+        const alreadySearched = previousSearch.trim() === itemName;
+        if (!alreadySearched) setNativeInputValue(searchInput, itemName);
+        row = await waitForMallItemRow(itemName, alreadySearched ? 600 : CONFIG.jumpTimeoutMs);
+      }
+
+      if (!row) {
+        // 商城搜索会整表重挂，原先抓到的 input 节点可能已脱离文档，回滚前重新定位一次
+        const restoreInput = findMallSearchInput() || searchInput;
+        if (restoreInput && previousSearch !== restoreInput.value) {
+          setNativeInputValue(restoreInput, previousSearch);
+        }
+        throw new Error(`商城列表中没有找到「${itemName}」，可能已下架，或商城正被港口筛选限制`);
+      }
+
+      const calculationRunning = state.offerLoading;
+      closePanel();
+      try {
+        activateMallRow(row, itemName);
+      } catch (activateError) {
+        // 面板已关闭，若点击失败就把面板恢复出来，避免用户只能看到空白
+        openPanel();
+        throw activateError;
+      }
+      state.jumpNotice = calculationRunning
+        ? `已在商城页面中打开「${itemName}」，后台计算仍在继续。`
+        : `已在商城页面中打开「${itemName}」。`;
+    } catch (error) {
+      state.error = `跳转失败：${error.message || '未知错误'}`;
+    } finally {
+      state.jumpBusy = '';
+      render();
+    }
+  }
+
   function render() {
     if (!elements['mpe-tbody']) return;
     renderMode();
@@ -1122,6 +1372,18 @@
     elements['mpe-badge'].hidden = count <= 0;
     elements['mpe-badge'].textContent = count > 999 ? '999+' : String(count);
     elements['mpe-port-count'].textContent = String(state.portBlacklist.length);
+
+    if (elements['mpe-status-note']) {
+      let note = CONFIG.defaultStatusNote;
+      if (state.jumpBusy) note = `正在商城列表中定位「${state.jumpBusy}」…`;
+      else if (state.storageWarning) note = state.storageWarning;
+      else if (state.jumpNotice) note = state.jumpNotice;
+      else if (state.truncatedCount > 0) {
+        note = `有 ${integerFormatter.format(state.truncatedCount)} 个商品的报价超过上限被截断，其总利润可能偏小。`;
+      }
+      elements['mpe-status-note'].textContent = note;
+      elements['mpe-status-note'].dataset.notice = String(note !== CONFIG.defaultStatusNote);
+    }
   }
 
   function renderSummary() {
@@ -1167,7 +1429,7 @@
       const name = escapeHtml(row.itemName);
       const common = `
         <td class="mpe-rank">${index + 1}</td>
-        <td class="mpe-item"><span title="${name}">${name}</span></td>
+        <td class="mpe-item"><button class="mpe-item-link" type="button" data-mpe-item="${name}" title="在商城页面中打开「${name}」的详情">${name}</button></td>
         <td class="mpe-number">${formatNumber(row.minSellPrice)}</td>
         <td class="mpe-number">${formatNumber(row.maxBuyPrice)}</td>
       `;
@@ -1236,6 +1498,14 @@
     }
   }
 
+  function noteStorageFailure(label, error) {
+    const message = String((error && error.message) || '');
+    state.storageWarning = /quota|exceed/i.test(message)
+      ? '本地缓存空间不足，已跳过缓存写入；重开面板会重新读取商城数据。'
+      : `本地缓存写入失败（${label}），结果只保留在当前页面。`;
+    console.warn('[Mall Profit] 缓存写入失败', label, error);
+  }
+
   async function persistMarket() {
     try {
       await chrome.storage.local.set({
@@ -1244,8 +1514,9 @@
           items: state.items
         }
       });
+      state.storageWarning = '';
     } catch (error) {
-      console.warn('[Mall Profit] 保存商品缓存失败', error);
+      noteStorageFailure('商品缓存', error);
     }
   }
 
@@ -1257,8 +1528,9 @@
           entries: state.totalCache
         }
       });
+      state.storageWarning = '';
     } catch (error) {
-      console.warn('[Mall Profit] 保存总利润缓存失败', error);
+      noteStorageFailure('总利润缓存', error);
     }
   }
 
@@ -1267,8 +1539,9 @@
       await chrome.storage.local.set({
         [STORAGE_KEYS.analyses]: state.analysisCache
       });
+      state.storageWarning = '';
     } catch (error) {
-      console.warn('[Mall Profit] 保存异常过滤缓存失败', error);
+      noteStorageFailure('异常过滤缓存', error);
     }
   }
 
@@ -1277,8 +1550,9 @@
       await chrome.storage.local.set({
         [STORAGE_KEYS.portBlacklist]: normalizePortNames(state.portBlacklist)
       });
+      state.storageWarning = '';
     } catch (error) {
-      console.warn('[Mall Profit] 保存港口黑名单失败', error);
+      noteStorageFailure('港口黑名单', error);
     }
   }
 

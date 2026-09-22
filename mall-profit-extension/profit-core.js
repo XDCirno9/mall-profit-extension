@@ -80,6 +80,47 @@
     return { offers: kept, blocked: excluded };
   }
 
+  function parsePortBlacklistText(text) {
+    const source = String(text === undefined || text === null ? '' : text);
+    let parsed = null;
+    let isJson = false;
+
+    try {
+      parsed = JSON.parse(source);
+      isJson = true;
+    } catch {
+      isJson = false;
+    }
+
+    let raw = null;
+    if (isJson) {
+      if (Array.isArray(parsed)) {
+        raw = parsed;
+      } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.ports)) {
+        raw = parsed.ports;
+      } else if (typeof parsed === 'string' || typeof parsed === 'number') {
+        raw = source.split(/[\r\n,]+/);
+      } else {
+        return { ok: false, error: 'JSON 中缺少 ports 数组' };
+      }
+    } else {
+      raw = source.split(/[\r\n,]+/);
+    }
+
+    const ports = [];
+    const seen = new Set();
+    for (const value of raw) {
+      if (value && typeof value === 'object') continue;
+      const name = String(value === undefined || value === null ? '' : value).trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      ports.push(name);
+    }
+
+    if (!ports.length) return { ok: false, error: '没有解析到任何港口名称' };
+    return { ok: true, ports };
+  }
+
   function median(values) {
     const sorted = values
       .filter((value) => Number.isFinite(value))
@@ -275,6 +316,7 @@
     normalizeItem,
     buildUnitRows,
     median,
+    parsePortBlacklistText,
     filterOutlierOffers,
     filterBlacklistedOffers,
     buildOfferAnalysis,

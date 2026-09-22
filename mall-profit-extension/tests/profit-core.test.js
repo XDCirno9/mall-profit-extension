@@ -84,6 +84,41 @@ const portAnalysis = Core.buildOfferAnalysis(
 );
 assert.equal(portAnalysis.maxBuyPrice, 8);
 assert.equal(portAnalysis.blacklistedOfferCount, 1);
+const parsedObject = Core.parsePortBlacklistText(JSON.stringify({
+  format: 'mall-profit-port-blacklist',
+  version: 1,
+  exportedAt: '2026-09-22T00:00:00.000Z',
+  ports: ['星月湾', '五月花港']
+}));
+assert.equal(parsedObject.ok, true);
+assert.deepEqual(parsedObject.ports, ['星月湾', '五月花港']);
+
+const parsedArray = Core.parsePortBlacklistText('["星月湾","五月花港"]');
+assert.deepEqual(parsedArray, { ok: true, ports: ['星月湾', '五月花港'] });
+
+const parsedLines = Core.parsePortBlacklistText('星月湾\n五月花港\r\n  \n星月湾');
+assert.deepEqual(parsedLines, { ok: true, ports: ['星月湾', '五月花港'] });
+
+const parsedCsv = Core.parsePortBlacklistText('星月湾, 五月花港,,中城港');
+assert.deepEqual(parsedCsv, { ok: true, ports: ['星月湾', '五月花港', '中城港'] });
+
+const parsedScalar = Core.parsePortBlacklistText('123');
+assert.deepEqual(parsedScalar, { ok: true, ports: ['123'] });
+
+const parsedBadObject = Core.parsePortBlacklistText('{"format":"mall-profit-port-blacklist"}');
+assert.equal(parsedBadObject.ok, false);
+assert.equal(parsedBadObject.error, 'JSON 中缺少 ports 数组');
+
+const parsedBadArray = Core.parsePortBlacklistText('[{"portName":"星月湾"}]');
+assert.equal(parsedBadArray.ok, false);
+
+const parsedEmpty = Core.parsePortBlacklistText('   ');
+assert.equal(parsedEmpty.ok, false);
+assert.equal(parsedEmpty.error, '没有解析到任何港口名称');
+
+const parsedEmptyObject = Core.parsePortBlacklistText('{}');
+assert.equal(parsedEmptyObject.ok, false);
+
 const sorted = Core.sortRows([
   { itemName: 'A', unitProfit: 1, totalProfit: null },
   { itemName: 'B', unitProfit: 3, totalProfit: null },

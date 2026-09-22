@@ -498,13 +498,44 @@
   overflow: hidden;
 }
 
-.mpe-item span {
+.mpe-item-link {
   display: block;
+  width: 100%;
   overflow: hidden;
+  margin: 0;
+  border: 0;
+  border-radius: 3px;
+  outline: none;
+  background: transparent;
+  padding: 3px 5px;
   color: #243027;
+  cursor: pointer;
+  font-size: 13px;
   font-weight: 900;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.mpe-item-link:hover {
+  background: rgba(189, 139, 40, 0.18);
+  color: #8f661a;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+.mpe-item-link:focus-visible {
+  background: rgba(189, 139, 40, 0.18);
+  color: #8f661a;
+  box-shadow: inset 0 0 0 2px var(--mpe-gold);
+}
+
+.mpe-jump-target {
+  outline: 2px solid #bd8b28 !important;
+  outline-offset: -2px !important;
+  background: rgba(189, 139, 40, 0.16) !important;
 }
 
 .mpe-number {
@@ -568,7 +599,7 @@
   }
 
   .mpe-heading p,
-  .mpe-status-note {
+  .mpe-status-note[data-notice="false"] {
     display: none;
   }
 
