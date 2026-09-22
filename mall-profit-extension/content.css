@@ -336,6 +336,32 @@
   width: 96px;
 }
 
+/* 「只算前 N 条」开关，对齐到工具条里其它控件的基线 */
+.mpe-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 38px;
+  color: var(--mpe-ink);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mpe-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--mpe-gold);
+  cursor: pointer;
+}
+
+.mpe-toggle[data-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* .mpe-field 自己声明了 display: grid，会盖过 UA 样式的 [hidden]{display:none}，得补一条 */
 .mpe-field[hidden] {
   display: none;

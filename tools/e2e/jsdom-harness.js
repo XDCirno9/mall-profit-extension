@@ -386,6 +386,13 @@ function commitChange(dom, id, value) {
   element.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
 }
 
+// 复选框要设 checked，不是 value
+function commitCheckbox(dom, id, checked) {
+  const element = dom.window.document.getElementById(id);
+  element.checked = checked;
+  element.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+}
+
 // ---- 表头排序相关 ----
 function headerButtons(dom) {
   return [...dom.window.document.querySelectorAll('#mpe-thead .mpe-th-button')];
@@ -962,10 +969,17 @@ async function scenarioScopeLimitedCalculation() {
     `hidden=${document.getElementById('mpe-scope-limit-field').hidden}`);
 
   commitChange(dom, 'mpe-calc-scope', 'filtered');
+  await sleep(30);
+  record('计算范围：默认不套条数上限，算筛选结果的全部',
+    calcButtonText(dom) === `开始计算（${SCOPE_ITEMS.length} 条）`
+      && document.getElementById('mpe-scope-toggle').checked === false,
+    `button=${calcButtonText(dom)}`);
+
+  commitCheckbox(dom, 'mpe-scope-toggle', true);
   commitChange(dom, 'mpe-scope-limit', '5');
   await sleep(30);
 
-  record('计算范围：切到当前筛选结果后条数上限可用，按钮只标这一轮的条数',
+  record('计算范围：勾上「只算前 N 条」后按钮只标这一轮的条数',
     limit().disabled === false && calcButtonText(dom) === '开始计算（5 条）',
     `disabled=${limit().disabled} button=${calcButtonText(dom)}`);
 

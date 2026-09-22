@@ -92,6 +92,8 @@
     minSellAmount: 0,
     vanillaFilter: 'all',
     calcScope: 'all',
+    // 「只算前 N 条」开关：默认关，「当前筛选结果」范围就是筛选结果的全部
+    scopeLimitEnabled: false,
     scopeLimit: 100,
     // 按钮上要显示「重新计算（N 条）」，但 setBusy 会在算报价时被调用上万次，
     // 所以这个数字只在 render 里算一次存下来，setBusy 只读它
@@ -222,8 +224,13 @@
               </select>
             </label>
 
-            <!-- 条数上限固定 100，不暴露给用户：可自定义对实际使用没什么价值。
-                 逻辑与校验都保留着，需要时去掉 hidden 就能恢复。 -->
+            <!-- 默认算筛选结果的全部；勾上才限制成前 100 条。
+                 数字框的值固定为默认值，不暴露给用户，逻辑与校验都还留着，去掉 hidden 即可恢复。 -->
+            <label class="mpe-toggle" id="mpe-scope-toggle-field">
+              <input id="mpe-scope-toggle" type="checkbox">
+              <span>只算前 ${CONFIG.defaultScopeLimit} 条</span>
+            </label>
+
             <label class="mpe-field mpe-scope-limit-field" id="mpe-scope-limit-field" hidden>
               <span>条数上限</span>
               <input id="mpe-scope-limit" type="number" min="1" step="1" inputmode="numeric">
@@ -330,6 +337,8 @@
       'mpe-vanilla-filter',
       'mpe-anomaly-filter',
       'mpe-calc-scope',
+      'mpe-scope-toggle',
+      'mpe-scope-toggle-field',
       'mpe-scope-limit',
       'mpe-scope-limit-field',
       'mpe-port-manager',
@@ -418,6 +427,12 @@
     // 计算范围只决定「下一次点计算算哪些」，表里已有的结果不动，所以切换时不必重算
     elements['mpe-calc-scope'].addEventListener('change', (event) => {
       state.calcScope = event.target.value === 'filtered' ? 'filtered' : 'all';
+      state.error = '';
+      render();
+    });
+
+    elements['mpe-scope-toggle'].addEventListener('change', (event) => {
+      state.scopeLimitEnabled = event.target.checked;
       state.error = '';
       render();
     });
@@ -1331,7 +1346,8 @@
   // 默认展示给用户的那个排名。判定用「有没有一行拿得出这个字段」，好让有值之后仍按用户选的排。
   function getScopeTargets() {
     const rows = getScopeRows();
-    if (state.calcScope !== 'filtered') return rows;
+    // 没勾「只算前 N 条」时筛选结果全都要算，也就没必要为了挑前 N 条再排一次序
+    if (state.calcScope !== 'filtered' || !state.scopeLimitEnabled) return rows;
     const field = Core.parseSortKey(state.sortKey).field;
     const usable = rows.some((row) => row[field] !== null && row[field] !== undefined);
     const ordered = Core.sortRows(rows, usable ? state.sortKey : MODE_DEFAULT_SORT.unit);
@@ -1343,7 +1359,8 @@
   // 能省掉一次 O(n log n) 就省掉。
   function computeScopeTargetCount() {
     if (state.calcScope !== 'filtered') return state.unitRows.length;
-    return Math.min(getScopeRows().length, normalizeScopeLimit(state.scopeLimit));
+    const count = getScopeRows().length;
+    return state.scopeLimitEnabled ? Math.min(count, normalizeScopeLimit(state.scopeLimit)) : count;
   }
 
   function getVisibleRows() {
@@ -1636,6 +1653,11 @@
     // 否则用户会以为在「全部商品」下填的数字也生效
     const scopeFiltered = state.calcScope === 'filtered';
     elements['mpe-calc-scope'].value = state.calcScope;
+    // 「只算前 N 条」只在「当前筛选结果」范围下有意义，其余范围置灰
+    elements['mpe-scope-toggle'].checked = state.scopeLimitEnabled;
+    elements['mpe-scope-toggle'].disabled = !scopeFiltered;
+    elements['mpe-scope-toggle-field'].dataset.disabled = String(!scopeFiltered);
+    elements['mpe-scope-toggle-field'].title = scopeFiltered ? '' : '仅「当前筛选结果」范围生效';
     elements['mpe-scope-limit'].disabled = !scopeFiltered;
     elements['mpe-scope-limit-field'].dataset.disabled = String(!scopeFiltered);
     elements['mpe-scope-limit-field'].title = scopeFiltered ? '' : '仅「当前筛选结果」范围生效';
@@ -1680,8 +1702,11 @@
           notice = true;
         } else if (state.calcScope === 'filtered') {
           // 计算范围是常驻设置不是临时提醒，所以拼在常规说明前面但不打高亮标记。
-          // 切回「全部商品」后这条会消失，而表里可能仍然只有上一轮算过的那 N 条结果。
-          note = `计算范围：当前筛选结果的前 ${integerFormatter.format(state.scopeTargetCount)} 条 · ${CONFIG.defaultStatusNote}`;
+          // 切回「全部商品」后这条会消失，而表里可能仍然只有上一轮算过的那部分结果。
+          const total = integerFormatter.format(state.scopeTargetCount);
+          note = state.scopeLimitEnabled
+            ? `计算范围：当前筛选结果的前 ${total} 条 · ${CONFIG.defaultStatusNote}`
+            : `计算范围：当前筛选结果的全部 ${total} 条 · ${CONFIG.defaultStatusNote}`;
         }
       }
       elements['mpe-status-note'].textContent = note;

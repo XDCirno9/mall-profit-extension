@@ -96,6 +96,12 @@
 
     // 收窄范围：只算当前筛选结果的前 3 条
     setControl(document.getElementById('mpe-calc-scope'), 'filtered');
+    // 「只算前 N 条」默认是关的，先记下这一档的按钮文案再打开它
+    R.toggleCheckedByDefault = document.getElementById('mpe-scope-toggle').checked;
+    R.buttonScopeAll = note('mpe-calculate');
+    var toggle = document.getElementById('mpe-scope-toggle');
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event('change', { bubbles: true }));
     setControl(document.getElementById('mpe-scope-limit'), String(SCOPE_LIMIT));
     R.limitDisabledAtFiltered = document.getElementById('mpe-scope-limit').disabled;
 
