@@ -11,6 +11,20 @@
     return number !== null && number > 0 ? number : null;
   }
 
+  // 「最高收价 ÷ 最低卖价」是否落在合理倍率内。limit <= 0 表示不设上限。
+  // 这是给 SMCShop 这种「聚合极值」数据源用的判据：它的两个价格都是全站极值，
+  // 而极值最容易被乱标的挂单占满（卖价 1 元的占位、收价 125000 的假收购），
+  // 倍率是识别它们最干净的特征——真实行商物品都在 10 倍以内，噪声是几百到十几万倍。
+  // 卖价缺失、非正或不是有限数时不判定：没有可比的基准，宁可放行也不要凭空误杀。
+  function withinPriceRatio(maxBuyPrice, minSellPrice, limit) {
+    const cap = toFiniteNumber(limit);
+    if (!(cap > 0)) return true;
+    const buy = toFiniteNumber(maxBuyPrice);
+    const sell = toFiniteNumber(minSellPrice);
+    if (buy === null || sell === null || !(sell > 0)) return true;
+    return buy / sell <= cap;
+  }
+
   function normalizeItem(item) {
     if (!item || typeof item !== 'object') return null;
     const itemName = String(item.itemName || '').trim();
@@ -344,6 +358,7 @@
 
   global.MallProfitCore = Object.freeze({
     normalizeItem,
+    withinPriceRatio,
     buildUnitRows,
     median,
     parsePortBlacklistText,

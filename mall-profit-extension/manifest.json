@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "商店利润筛选器",
-  "version": "1.11.0",
-  "description": "在鸢尾花商城和 SMCShop 上筛选正利润物品，点击商品名可直接跳转到物品详情；鸢尾花商城另支持异常价格过滤、原版/非原版和港口黑名单。",
+  "version": "1.12.0",
+  "description": "在鸢尾花商城和 SMCShop 上筛选正利润物品，点击商品名可直接跳转到物品详情；鸢尾花商城另支持异常价格过滤、原版/非原版和港口黑名单；SMCShop 另有价格倍率上限，用来滤掉玩家乱标价造成的虚高利润。",
   "permissions": [
     "storage",
     "unlimitedStorage"

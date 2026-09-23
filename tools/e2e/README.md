@@ -22,7 +22,7 @@ npm i -D jsdom          # once; jsdom is intentionally not a project dependency
 node tools/e2e/jsdom-harness.js
 ```
 
-Prints `PASS`/`FAIL` per assertion and `n/90 通过` at the end. Covers:
+Prints `PASS`/`FAIL` per assertion and `n/94 通过` at the end. Covers:
 
 - fast path: row already rendered, search box untouched, panel stays open on top of
   the mall detail, and the mall dialog is still a `body`-level child;
@@ -70,6 +70,11 @@ Prints `PASS`/`FAIL` per assertion and `n/90 通过` at the end. Covers:
 - error-state reset: after an `/offers` failure shows the retry button, switching the
   anomaly multiplier must clear it — the cache is replaced wholesale, so the old counts
   have nothing left to top up;
+- price-ratio cap: hidden on the mall site (its quotes are real market data, so a large
+  buy/sell ratio is normal there), and on SMCShop it drops exactly the rows whose extremes
+  are player junk. The fixture pairs realistic spreads with two real-world samples
+  (`成书` 1 → 125000, `骨头` 1 → 99999); setting the cap to "off" brings them back and the
+  toggle must fire **no request at all**, because the verdict comes from the loaded snapshot;
 - SMCShop: on a second host the panel swaps in that site's title and column names, hides
   every feature the site cannot support (rather than greying them out), shows the ranking
   as soon as it opens because the server pre-aggregates min-sell/max-buy, and keeps its
@@ -310,13 +315,16 @@ agent-browser eval 'JSON.stringify(window.__R)'
 ```
 
 This one runs against the second marketplace for real, so it also covers what jsdom cannot:
-the real 680KB summary payload (~8,700 items), the real `#search-form` / `#results` markup,
-and whether the injected `eval` survives that site's CSP.
+the real ~6MB summary payload (currently ~60,000 items), the real `#search-form` / `#results`
+markup, and whether the injected `eval` survives that site's CSP.
 
 | Field | Observed |
 | --- | --- |
 | `title` / `headerLabels` | `SMCShop 利润筛选器` / `#,商品,最低卖价,最高收价,单件利润,利润率,商店数` |
-| `rowCount` / `dataStatus` | 378 positive-profit items out of 8,727 |
+| `rowCount` / `rowsWithoutRatio` | `306` with the 10× cap on, `388` with it off |
+| `ratioHiddenCount` / `removedByRatio` | `82` / `成书,骨头,合金装备原胚,虚空远征激光枪-老鼠,高级火箭靴强化芯片,世界鲨鱼的零食,红木椅子,悲灾骸颅` |
+| `noisyGoneWithRatio` / `noisyBackWithoutRatio` | both empty / both present — the cap hides them and only the cap does |
+| `dataStatus` | `已读取 59,945 个物品` |
 | `hiddenControls` | all six unsupported controls |
 | `jumpTarget` vs `detailHeading` | identical — the detail that opened is the item that was clicked |
 | `panelOpenAfterJump` | `false` — the panel folds away so the in-page detail is visible |

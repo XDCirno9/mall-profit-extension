@@ -45,14 +45,21 @@ const SCOPE_ITEMS = Array.from({ length: 12 }, (unused, index) => {
 // 「深板岩圆石台阶」刻意排在「深板岩圆石」**前面**——搜「深板岩圆石」时服务端是模糊匹配，
 // 两张卡片都会出来，只有按 data-item 精确相等去挑才不会点错。「黄铁矿」的最高收价低于
 // 最低卖价，必须被 buildUnitRows 过滤掉。
+// 夹具按真实站点抄：行商物品的收价/卖价倍率都在 10 倍以内，
+// 而玩家乱标价会把极值撑到几百上千倍（成书 1 → 125000、骨头 1 → 99999 都是实测抓到的原值）
 const SMC_SUMMARIES = [
   { item: '钻石', count: 12, minSellPrice: 40, maxBuyPrice: 90 },
   { item: '石头', count: 420, minSellPrice: 1, maxBuyPrice: 3.5 },
-  { item: '圆石', count: 598, minSellPrice: 0.1, maxBuyPrice: 2 },
-  { item: '深板岩圆石台阶', count: 88, minSellPrice: 0.05, maxBuyPrice: 0.9 },
-  { item: '深板岩圆石', count: 300, minSellPrice: 0.08, maxBuyPrice: 1.2 },
-  { item: '黄铁矿', count: 50, minSellPrice: 3, maxBuyPrice: 1 }
+  { item: '圆石', count: 598, minSellPrice: 0.5, maxBuyPrice: 2 },
+  { item: '深板岩圆石台阶', count: 88, minSellPrice: 0.6, maxBuyPrice: 1 },
+  { item: '深板岩圆石', count: 300, minSellPrice: 0.7, maxBuyPrice: 1.8 },
+  { item: '黄铁矿', count: 50, minSellPrice: 3, maxBuyPrice: 1 },
+  { item: '成书', count: 41, minSellPrice: 1, maxBuyPrice: 125000 },
+  { item: '骨头', count: 50, minSellPrice: 1, maxBuyPrice: 99999 }
 ];
+
+// 倍率上限默认 10 倍时应该被隐藏的那两个（成书 125000×、骨头 99999×）
+const SMC_NOISY_ITEMS = ['成书', '骨头'];
 
 // 跟 content.js 的 CONFIG.maxScopeLimit 对齐，作为条数上限的契约写进断言
 
@@ -538,6 +545,12 @@ async function scenarioFastPath() {
     statusNote(dom).includes('面板保持打开'), statusNote(dom));
   record('快路径：商城详情显示该物品',
     mall.detail.textContent.includes('石头'), mall.detail.textContent);
+  // 商城的报价是服务端给出的真实行情，便宜材料差价本来就大，倍率判据在这里只会误杀
+  const ratioField = dom.window.document.querySelector('.mpe-price-ratio-field');
+  record('价格倍率上限：商城站点整块隐藏，说明文字里也不出现',
+    Boolean(ratioField) && ratioField.classList.contains('mpe-hidden')
+      && !dom.window.document.getElementById('mpe-explainer').textContent.includes('最高收价超过最低卖价'),
+    ratioField ? `class="${ratioField.className}"` : 'null');
   dom.window.close();
 }
 
@@ -1140,6 +1153,33 @@ async function scenarioSmcshopSite() {
   record('SMCShop：打开面板直接出排行，负利润物品被过滤',
     rowNames(dom).join(',') === '钻石,石头,圆石,深板岩圆石,深板岩圆石台阶',
     rowNames(dom).join(','));
+
+  // 倍率上限默认 10 倍。它拦的正是「卖价 1 元占位 + 收价乱标」的挂单——
+  // 这类物品的极值差虚高到几十万，不管的话会直接顶到排行榜最前面
+  const keptNames = rowNames(dom);
+  record('SMCShop：倍率超上限的乱标价物品被隐藏',
+    SMC_NOISY_ITEMS.every((name) => !keptNames.includes(name)) && keptNames.length === 5,
+    keptNames.join(','));
+
+  record('SMCShop：说明文字报出被隐藏了几个物品',
+    document.getElementById('mpe-explainer').textContent.includes('最高收价超过最低卖价 10 倍')
+      && document.getElementById('mpe-explainer').textContent.includes('2 个'),
+    document.getElementById('mpe-explainer').textContent);
+
+  // 判据全部来自商品快照（summaries 现成的字段），所以调档位只重绘表格，一个请求都不该发
+  const requestsBeforeRatio = dom.__requests.length;
+  const ratioSelect = document.getElementById('mpe-price-ratio-filter');
+  ratioSelect.value = '0';
+  ratioSelect.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await sleep(INPUT_SETTLE_MS);
+  record('SMCShop：倍率调成「关闭过滤」后这些物品原样回来，且没发请求',
+    SMC_NOISY_ITEMS.every((name) => rowNames(dom).includes(name))
+      && dom.__requests.length === requestsBeforeRatio,
+    `${rowNames(dom).join(',')} 新增请求=${dom.__requests.length - requestsBeforeRatio}`);
+
+  ratioSelect.value = '10';
+  ratioSelect.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await sleep(INPUT_SETTLE_MS);
 
   record('SMCShop：缓存键带站点后缀，不会把商城那份读成自己的',
     Object.keys(dom.__store).some((key) => key.endsWith('.smcshop')), Object.keys(dom.__store).join(','));

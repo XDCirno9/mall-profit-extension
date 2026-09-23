@@ -191,6 +191,26 @@ const beforeSort = JSON.parse(JSON.stringify(sortFixture));
 Core.sortRows(sortFixture, 'unitProfit-asc');
 assert.deepEqual(sortFixture, beforeSort);
 
+// 价格倍率上限：给 SMCShop 那种「聚合极值」数据源用的噪声判据。它的两个价格都是全站极值，
+// 而真实行商物品的倍率都在 10 倍以内，乱标价的挂单能把极值撑到十几万倍
+// （实测抓到的原值：成书卖价 1 → 收价 125000、骨头卖价 1 → 收价 99999）
+assert.equal(Core.withinPriceRatio(125000, 1, 10), false);
+assert.equal(Core.withinPriceRatio(99999, 1, 10), false);
+assert.equal(Core.withinPriceRatio(90, 40, 10), true);
+// 判据是「超过」上限才拦，恰好等于算通过
+assert.equal(Core.withinPriceRatio(100, 10, 10), true);
+assert.equal(Core.withinPriceRatio(100.1, 10, 10), false);
+// limit <= 0 表示不设上限（商城的 features.priceRatioFilter 就是关的）
+assert.equal(Core.withinPriceRatio(125000, 1, 0), true);
+assert.equal(Core.withinPriceRatio(125000, 1, null), true);
+assert.equal(Core.withinPriceRatio(125000, 1, undefined), true);
+// 卖价缺失、非正或不是有限数时没有可比的基准，宁可放行也不要凭空误杀
+assert.equal(Core.withinPriceRatio(5, 0, 10), true);
+assert.equal(Core.withinPriceRatio(5, null, 10), true);
+assert.equal(Core.withinPriceRatio(5, -1, 10), true);
+assert.equal(Core.withinPriceRatio(5, Number.NaN, 10), true);
+assert.equal(Core.withinPriceRatio(null, 5, 10), true);
+
 console.log('profit-core tests passed');
 
 

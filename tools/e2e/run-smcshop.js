@@ -2,16 +2,21 @@
  * SMCShop driver ("the same extension, a second shop").
  *
  * The jsdom harness proves the selection and jump logic against a fixture; this
- * one proves it against the real page, the real 8700-item summary payload and
- * the real DOM, which is where a wrong selector or a wrong relative URL would
- * only show up:
+ * one proves it against the real page, the real summary payload (currently
+ * ~60000 items / ~6MB) and the real DOM, which is where a wrong selector or a
+ * wrong relative URL would only show up:
  *   1. the panel opens with this site's own title and column names;
  *   2. the features this shop cannot support are hidden, not greyed out;
  *   3. the ranking is there as soon as the panel opens — no "calculate" step,
  *      because the server already aggregates min sell / max buy per item;
- *   4. clicking an item name opens its shop detail *and* collapses the panel,
+ *   4. the price-ratio cap drops the rows whose extremes are player junk
+ *      (real site: 成书 sell 1 → buy 125000, 骨头 sell 1 → buy 99999). Toggling
+ *      the cap off and on again shows exactly which rows it removes and proves
+ *      the toggle fires no request at all — the verdict comes from the
+ *      already-loaded summary snapshot;
+ *   5. clicking an item name opens its shop detail *and* collapses the panel,
  *      since the detail is page content rather than an overlay;
- *   5. the item opened is the exact one clicked, not a fuzzy-match neighbour.
+ *   6. the item opened is the exact one clicked, not a fuzzy-match neighbour.
  *
  * The flow pauses at phase `measured` so the shell can take a screenshot:
  *   agent-browser eval 'window.__MPE_CONTINUE = true'
@@ -24,6 +29,11 @@
   function itemButtons() {
     return Array.prototype.slice.call(document.querySelectorAll('#mpe-tbody .mpe-item-link'));
   }
+  function names() {
+    return itemButtons().map(function (node) { return node.getAttribute('data-mpe-item'); });
+  }
+  // 真实站点上实测到的「乱标价」样本：卖价 1 元的占位挂单配一个十几万的收价
+  var NOISY = ['成书', '骨头'];
   function note(id) {
     var el = document.getElementById(id);
     return el ? (el.textContent || '').trim() : null;
@@ -74,6 +84,34 @@
       ? document.querySelectorAll('#mpe-tbody tr').length
       : 0;
     R.errorText = note('mpe-error');
+
+    // 价格倍率上限：默认 10 倍，判据全部来自已经加载完的 summaries 快照。
+    // 关掉它再数一遍，两边一减就知道它到底拦了什么，顺便证明切换过程一个请求都没发。
+    var ratioSelect = document.getElementById('mpe-price-ratio-filter');
+    R.ratioSelectPresent = Boolean(ratioSelect);
+    R.ratioSelectValue = ratioSelect ? ratioSelect.value : null;
+    R.ratioHiddenCount = (function () {
+      var m = /(\d+(?:,\d+)*)\s*个/.exec(note('mpe-explainer') || '');
+      return m ? m[1] : null;
+    })();
+
+    var withRatio = names();
+    var withoutRatio = withRatio.slice();
+    if (ratioSelect) {
+      ratioSelect.value = '0';
+      ratioSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      withoutRatio = names();
+      ratioSelect.value = '10';
+      ratioSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    R.rowsWithRatio = withRatio.length;
+    R.rowsWithoutRatio = withoutRatio.length;
+    R.removedByRatio = withoutRatio.filter(function (name) {
+      return withRatio.indexOf(name) === -1;
+    }).slice(0, 8);
+    R.noisyGoneWithRatio = NOISY.filter(function (name) { return withRatio.indexOf(name) === -1; });
+    R.noisyBackWithoutRatio = NOISY.filter(function (name) { return withoutRatio.indexOf(name) !== -1; });
+    R.rowsAfterRestore = names().length;
 
     var first = itemButtons()[0];
     var target = first.getAttribute('data-mpe-item');

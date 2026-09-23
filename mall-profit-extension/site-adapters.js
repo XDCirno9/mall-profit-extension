@@ -45,6 +45,9 @@
     features: Object.freeze({
       totalProfit: true,
       anomalyFilter: true,
+      // 商城的报价是服务端给出的真实行情，倍率大是正常的（便宜材料差价就是大），
+      // 这个判据只对 SMCShop 那种聚合极值的数据源有意义
+      priceRatioFilter: false,
       portBlacklist: true,
       vanillaFilter: true,
       manualCalculation: true
@@ -103,6 +106,11 @@
     features: Object.freeze({
       totalProfit: false,
       anomalyFilter: false,
+      // 这两个价格都是全站极值，极值最容易被乱标的挂单占满（成书卖价 1 收价 125000、
+      // 骨头卖价 1 收价 99999，查询到的明细里 SELL 侧甚至有人标 1e26），
+      // 而真实行商物品的收价/卖价倍率都在 10 倍以内，所以按倍率上限把噪声整行筛掉。
+      // 这个判据只用 summaries 现成的字段，不需要额外请求，是开面板就生效的。
+      priceRatioFilter: true,
       portBlacklist: false,
       vanillaFilter: false,
       manualCalculation: false

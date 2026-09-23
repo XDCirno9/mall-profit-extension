@@ -101,6 +101,12 @@
     scopeTargetCount: 0,
     // 不支持异常过滤的站点必须留在 0：那一支要求每行都有分析结果，否则整张表会一片空白
     anomalyMultiplier: Site.features.anomalyFilter ? 10 : 0,
+    // 「最高收价 ÷ 最低卖价」的上限倍率，0 = 不过滤。默认 10 倍是实测出来的分界线：
+    // 真实行商物品的倍率都在 10 倍以内，而乱标价造成的虚高是几百到十几万倍。
+    // 只有聚合极值的数据源（SMCShop）才开这个开关，商城那边报价是真实行情，倍率大是正常的。
+    priceRatioLimit: Site.features.priceRatioFilter ? 10 : 0,
+    // 被倍率上限筛掉的行数，渲染说明文字时用
+    priceRatioHiddenCount: 0,
     panelOpen: false,
     dataLoading: false,
     offerLoading: false,
@@ -162,6 +168,7 @@
     toggle(elements['mpe-calculate'], features.manualCalculation);
     toggle(elements['mpe-calc-scope'].closest('.mpe-field'), features.manualCalculation);
     toggle(elements['mpe-anomaly-filter'].closest('.mpe-field'), features.anomalyFilter);
+    toggle(elements['mpe-price-ratio-filter'].closest('.mpe-field'), features.priceRatioFilter);
     toggle(elements['mpe-vanilla-filter'].closest('.mpe-field'), features.vanillaFilter);
     toggle(elements['mpe-port-manager'], features.portBlacklist);
   }
@@ -234,6 +241,18 @@
                 <option value="5">严格 · 5×中位数</option>
                 <option value="10">推荐 · 10×中位数</option>
                 <option value="20">宽松 · 20×中位数</option>
+              </select>
+            </label>
+
+            <!-- 只用聚合快照现成的极值就能判，不需要逐物品取明细，所以切换即刻生效 -->
+            <label class="mpe-field mpe-price-ratio-field">
+              <span>价格倍率上限</span>
+              <select id="mpe-price-ratio-filter">
+                <option value="0">关闭过滤</option>
+                <option value="5">严格 · 5 倍</option>
+                <option value="10">推荐 · 10 倍</option>
+                <option value="20">宽松 · 20 倍</option>
+                <option value="50">很宽松 · 50 倍</option>
               </select>
             </label>
 
@@ -346,6 +365,7 @@
       'mpe-min-sell-amount',
       'mpe-vanilla-filter',
       'mpe-anomaly-filter',
+      'mpe-price-ratio-filter',
       'mpe-calc-scope',
       'mpe-port-manager',
       'mpe-port-count',
@@ -433,6 +453,13 @@
     // 计算范围只决定「下一次点计算算哪些」，表里已有的结果不动，所以切换时不必重算
     elements['mpe-calc-scope'].addEventListener('change', (event) => {
       state.calcScope = event.target.value === 'filtered' ? 'filtered' : 'all';
+      state.error = '';
+      render();
+    });
+
+    // 倍率上限是纯视图筛选：判据来自商品快照，不碰报价明细，所以切一下只重绘不重算
+    elements['mpe-price-ratio-filter'].addEventListener('change', (event) => {
+      state.priceRatioLimit = Number(event.target.value) || 0;
       state.error = '';
       render();
     });
@@ -686,10 +713,17 @@
     const anomalyText = state.anomalyMultiplier > 0
       ? (' 异常报价按同商品中位数的 ' + state.anomalyMultiplier + ' 倍过滤。')
       : '';
+    // 说清楚被藏掉的是「极值被乱标价污染」的行，并给出条数，免得用户以为物品凭空消失了
+    const ratioText = state.priceRatioLimit > 0
+      ? (' 最高收价超过最低卖价 ' + state.priceRatioLimit + ' 倍的物品已隐藏'
+        + (state.priceRatioHiddenCount > 0
+          ? '（' + integerFormatter.format(state.priceRatioHiddenCount) + ' 个）。'
+          : '。'))
+      : '';
     const blockedText = state.portBlacklist.length > 0
       ? (' 已屏蔽 ' + state.portBlacklist.length + ' 个港口的报价。')
       : '';
-    elements['mpe-explainer'].textContent = modeText + anomalyText + blockedText;
+    elements['mpe-explainer'].textContent = modeText + anomalyText + ratioText + blockedText;
   }
 
   function getTableColumns() {
@@ -1307,16 +1341,21 @@
     elements['mpe-retry'].textContent = `重试失败项（${integerFormatter.format(failed)}）`;
   }
 
-  // 「看什么」的筛选条件只留这一份：搜索、最低在售数量、商品版本。
+  // 「看什么」的筛选条件只留这一份：搜索、最低在售数量、商品版本、价格倍率。
   // 抽出来是因为「只计算当前筛选结果」得在分析缓存还空着的时候先筛一遍商品快照——
   // 那会儿 getVisibleRows() 里绝大多数行还没有结果会被判成不可见，筛出来是 0 条。
   function matchesFilter(row, search) {
     if (search && !row.itemName.toLocaleLowerCase('zh-CN').includes(search)) return false;
     if (row.sellAmount < state.minSellAmount) return false;
+    if (!withinPriceRatio(row)) return false;
     const isVanilla = Boolean(row.vanillaId);
     if (state.vanillaFilter === 'vanilla' && !isVanilla) return false;
     if (state.vanillaFilter === 'non-vanilla' && isVanilla) return false;
     return true;
+  }
+
+  function withinPriceRatio(row) {
+    return Core.withinPriceRatio(row.maxBuyPrice, row.minSellPrice, state.priceRatioLimit);
   }
 
   function currentSearchKeyword() {
@@ -1694,6 +1733,11 @@
     const rows = getVisibleRows();
     // 「开始计算（N 条）」里的 N 在这里算一次存进 state：setBusy 在算报价时会被调上万次，只读它
     state.scopeTargetCount = getScopeTargets().length;
+    // 说明文字要报出被倍率上限筛掉几条，这里顺带数一遍。
+    // unitRows 本来就只剩正利润行（SMCShop 实测 388 行），这点开销可以忽略
+    state.priceRatioHiddenCount = state.priceRatioLimit > 0
+      ? state.unitRows.reduce((count, row) => count + (withinPriceRatio(row) ? 0 : 1), 0)
+      : 0;
     renderMode();
     renderStatus(rows);
     renderSummary(rows);
@@ -1704,6 +1748,7 @@
     syncInputValue(elements['mpe-min-sell-amount'], state.minSellAmount > 0 ? String(state.minSellAmount) : '');
     elements['mpe-vanilla-filter'].value = state.vanillaFilter;
     elements['mpe-anomaly-filter'].value = String(state.anomalyMultiplier);
+    elements['mpe-price-ratio-filter'].value = String(state.priceRatioLimit);
     elements['mpe-calc-scope'].value = state.calcScope;
     setBusy();
   }
