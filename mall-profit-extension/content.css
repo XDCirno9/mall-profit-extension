@@ -332,6 +332,12 @@
   min-width: 145px;
 }
 
+/* 站点不支持的功能整块藏掉。用类而不是 hidden 属性：.mpe-field / .mpe-button 自己声明了
+   display，属性会被盖过，得用 !important 才压得住 */
+.mpe-hidden {
+  display: none !important;
+}
+
 .mpe-field select:focus,
 .mpe-field input:focus {
   border-color: var(--mpe-gold);

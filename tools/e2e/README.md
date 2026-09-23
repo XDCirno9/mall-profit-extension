@@ -22,7 +22,7 @@ npm i -D jsdom          # once; jsdom is intentionally not a project dependency
 node tools/e2e/jsdom-harness.js
 ```
 
-Prints `PASS`/`FAIL` per assertion and `n/81 通过` at the end. Covers:
+Prints `PASS`/`FAIL` per assertion and `n/90 通过` at the end. Covers:
 
 - fast path: row already rendered, search box untouched, panel stays open on top of
   the mall detail, and the mall dialog is still a `body`-level child;
@@ -69,7 +69,13 @@ Prints `PASS`/`FAIL` per assertion and `n/81 通过` at the end. Covers:
   (100…111), so a limit of 1000 must leave exactly the rows the table shows.
 - error-state reset: after an `/offers` failure shows the retry button, switching the
   anomaly multiplier must clear it — the cache is replaced wholesale, so the old counts
-  have nothing left to top up.
+  have nothing left to top up;
+- SMCShop: on a second host the panel swaps in that site's title and column names, hides
+  every feature the site cannot support (rather than greying them out), shows the ranking
+  as soon as it opens because the server pre-aggregates min-sell/max-buy, and keeps its
+  cache under a `.smcshop` suffixed key. The jump fixture puts `深板岩圆石台阶` *before*
+  `深板岩圆石` in the fuzzy search results, so clicking `深板岩圆石` only lands on the right
+  card if the card is picked by exact `data-item` equality.
 
 If `jsdom` cannot be resolved, the script exits with code 2 and a hint. You can
 also point `NODE_PATH` at any `node_modules` that contains it.
@@ -84,7 +90,7 @@ Needs `agent-browser` (a Playwright-core wrapper) on `PATH`.
 python tools/e2e/gen-inject.py
 ```
 
-This inlines the real `content.css`, `profit-core.js` and `content.js` into
+This inlines the real `content.css`, `profit-core.js`, `site-adapters.js` and `content.js` into
 `tools/e2e/inject.js` (gitignored — regenerate after every source change). The
 script is registered with `--init-script`, so it runs before the mall bundle and
 only defines helpers:
@@ -287,6 +293,34 @@ the filter back on and clicks calculate:
 Unlike `run-perf.js`, this driver deliberately keeps the harness's `/items` rewrite: it
 is not measuring cost, it only needs a dataset where "scoped to 3" and "scoped to all"
 differ visibly, and 100 items (38 rows) is plenty.
+
+### 2.8 Run the SMCShop driver
+
+```bash
+agent-browser open https://shop.whalemc.com/ --init-script tools/e2e/inject.js
+agent-browser set viewport 1600 900
+agent-browser wait 8000
+agent-browser eval "$(cat tools/e2e/run-smcshop.js)"
+
+# the driver pauses at phase "measured" for a screenshot:
+agent-browser screenshot ./smcshop.png
+agent-browser eval 'window.__MPE_CONTINUE = true; "go"'
+# ...poll until phase "measured", then:
+agent-browser eval 'JSON.stringify(window.__R)'
+```
+
+This one runs against the second marketplace for real, so it also covers what jsdom cannot:
+the real 680KB summary payload (~8,700 items), the real `#search-form` / `#results` markup,
+and whether the injected `eval` survives that site's CSP.
+
+| Field | Observed |
+| --- | --- |
+| `title` / `headerLabels` | `SMCShop 利润筛选器` / `#,商品,最低卖价,最高收价,单件利润,利润率,商店数` |
+| `rowCount` / `dataStatus` | 378 positive-profit items out of 8,727 |
+| `hiddenControls` | all six unsupported controls |
+| `jumpTarget` vs `detailHeading` | identical — the detail that opened is the item that was clicked |
+| `panelOpenAfterJump` | `false` — the panel folds away so the in-page detail is visible |
+| `errorText` / `errorAfterJump` | `""` / `""` |
 
 ## Gotchas that cost time
 

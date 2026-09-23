@@ -13,6 +13,7 @@ try {
 const EXT_DIR = path.resolve(__dirname, '..', '..', 'mall-profit-extension');
 
 const PROFIT_CORE = fs.readFileSync(path.join(EXT_DIR, 'profit-core.js'), 'utf8');
+const SITE_ADAPTERS = fs.readFileSync(path.join(EXT_DIR, 'site-adapters.js'), 'utf8');
 const CONTENT_JS = fs.readFileSync(path.join(EXT_DIR, 'content.js'), 'utf8');
 const CONTENT_CSS = fs.readFileSync(path.join(EXT_DIR, 'content.css'), 'utf8');
 
@@ -39,6 +40,21 @@ const SCOPE_ITEMS = Array.from({ length: 12 }, (unused, index) => {
     vanillaId: index % 2 === 0 ? null : 'minecraft:stone'
   };
 });
+
+// SMCShop 夹具：服务端 /api/shops?item= 留空时返回的全库聚合（summaries）。
+// 「深板岩圆石台阶」刻意排在「深板岩圆石」**前面**——搜「深板岩圆石」时服务端是模糊匹配，
+// 两张卡片都会出来，只有按 data-item 精确相等去挑才不会点错。「黄铁矿」的最高收价低于
+// 最低卖价，必须被 buildUnitRows 过滤掉。
+const SMC_SUMMARIES = [
+  { item: '钻石', count: 12, minSellPrice: 40, maxBuyPrice: 90 },
+  { item: '石头', count: 420, minSellPrice: 1, maxBuyPrice: 3.5 },
+  { item: '圆石', count: 598, minSellPrice: 0.1, maxBuyPrice: 2 },
+  { item: '深板岩圆石台阶', count: 88, minSellPrice: 0.05, maxBuyPrice: 0.9 },
+  { item: '深板岩圆石', count: 300, minSellPrice: 0.08, maxBuyPrice: 1.2 },
+  { item: '黄铁矿', count: 50, minSellPrice: 3, maxBuyPrice: 1 }
+];
+
+// 跟 content.js 的 CONFIG.maxScopeLimit 对齐，作为条数上限的契约写进断言
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -167,6 +183,59 @@ function buildMallDom(dom, initialItems) {
   };
 }
 
+// 忠实复现 SMCShop app.js 里本扩展会碰到的那条链路：
+// 提交表单 → 服务端模糊搜索 → 渲染卡片；点卡片 → 把详情渲进 #details。
+// 真站点还有复制坐标、历史记录等，这里不需要。
+function buildSmcshopDom(dom, summaries) {
+  const document = dom.window.document;
+  // 只往 body 追加，不要覆盖：插件 UI 已经挂在 body 上了，覆盖会连 #mpe-root 一起删掉
+  const shell = document.createElement('div');
+  shell.innerHTML = `
+    <header class="masthead"><h2>查询玩家商店</h2></header>
+    <main>
+      <form id="search-form" class="searchbar">
+        <input id="item" name="item" placeholder="输入物品名称" autocomplete="off">
+        <select id="type" name="type">
+          <option value="">全部商店</option>
+          <option value="SELL">出售</option>
+          <option value="BUY">收购</option>
+        </select>
+        <button type="submit">查询</button>
+      </form>
+      <div class="status" id="status">Loading latest observations...</div>
+      <section id="results" class="results"></section>
+      <section id="details" class="details" hidden></section>
+    </main>`;
+  document.body.appendChild(shell);
+
+  const form = document.getElementById('search-form');
+  const input = document.getElementById('item');
+  const results = document.getElementById('results');
+  const details = document.getElementById('details');
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const query = input.value.trim();
+    const matched = summaries.filter((entry) => !query || entry.item.includes(query));
+    details.hidden = true;
+    results.hidden = false;
+    results.innerHTML = matched
+      .map((entry) => `<button class="item-card" type="button" data-item="${entry.item}">${entry.item}</button>`)
+      .join('');
+  });
+
+  results.addEventListener('click', (event) => {
+    const card = event.target.closest('button.item-card[data-item]');
+    if (!card) return;
+    const name = card.dataset.item;
+    const entry = summaries.find((item) => item.item === name);
+    results.hidden = true;
+    details.hidden = false;
+    details.innerHTML = `<div class="details-heading"><h2>${name}</h2></div>
+      <div class="detail-list">${entry ? entry.count : 0} 家商店</div>`;
+  });
+}
+
 async function createExtensionDom(url, options = {}) {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url,
@@ -199,12 +268,19 @@ async function createExtensionDom(url, options = {}) {
   };
 
   dom.window.fetch = async (input) => {
-    const target = new URL(String(input));
+    // 相对路径要按页面地址补齐：SMCShop 的接口是同源相对路径，商城那边才是绝对 URL
+    const target = new URL(String(input), dom.window.location.href);
     const requestPath = target.pathname + target.search;
     dom.__requests.push(requestPath);
     let payload;
 
-    if (target.pathname === '/api/mall/items') {
+    if (target.hostname === 'shop.whalemc.com') {
+      if (target.pathname !== '/api/shops') throw new Error(`未预期的请求 ${requestPath}`);
+      const query = target.searchParams.get('item') || '';
+      const matched = (options.smcshop || []).filter((entry) => !query || entry.item.includes(query));
+      // 真服务端 item 留空时只回 summaries（全库聚合），带 item 时回 shops 明细
+      payload = { shops: [], summaries: matched, total: 30909, matched: matched.length };
+    } else if (target.pathname === '/api/mall/items') {
       const limit = Number(target.searchParams.get('limit') || 100);
       const offset = Number(target.searchParams.get('offset') || 0);
       payload = { total: items.length, items: items.slice(offset, offset + limit) };
@@ -226,6 +302,7 @@ async function createExtensionDom(url, options = {}) {
   };
 
   dom.window.eval(PROFIT_CORE);
+  dom.window.eval(SITE_ADAPTERS);
 
   // content.js 在启动时把 globalThis.MallProfitCore 存进闭包，所以必须在它之前换掉整份导出。
   // 导出对象本身是 Object.freeze 的，因此用浅拷贝包一层来做计数。
@@ -268,10 +345,15 @@ function setViewport(dom, width, height) {
 async function openPanelOnly(dom) {
   const document = dom.window.document;
   document.getElementById('mpe-launcher').click();
-  await waitFor(
+  // 超时的时候直接把状态栏、错误条和请求记录一起抛出来，否则只看到一句「超时」没法查
+  const ready = await waitFor(
     () => document.getElementById('mpe-data-status').textContent.includes('已读取'),
     '商品列表读取完成'
-  );
+  ).catch(() => null);
+  if (!ready) {
+    throw new Error('商品列表读取失败：status="' + document.getElementById('mpe-data-status').textContent
+      + '" error="' + errorText(dom) + '" requests=' + dom.__requests.join(' '));
+  }
 }
 
 async function openPanelAndLoad(dom) {
@@ -342,6 +424,11 @@ const INPUT_SETTLE_MS = 450;
 function rowNames(dom) {
   return [...dom.window.document.querySelectorAll('#mpe-tbody button[data-mpe-item]')]
     .map((node) => node.dataset.mpeItem);
+}
+
+function headerLabels(dom) {
+  return [...dom.window.document.querySelectorAll('#mpe-thead th')]
+    .map((th) => th.textContent.replace(/[⇅▲▼]/g, '').trim());
 }
 
 function calcButtonText(dom) {
@@ -1027,6 +1114,57 @@ async function scenarioErrorStateResets() {
   dom.window.close();
 }
 
+// SMCShop 适配（v1.11.0）：同一个扩展换到另一个商城，只做单件利润排行
+async function scenarioSmcshopSite() {
+  const dom = await createExtensionDom('https://shop.whalemc.com/', { smcshop: SMC_SUMMARIES });
+  buildSmcshopDom(dom, SMC_SUMMARIES);
+  await openPanelOnly(dom);
+  const document = dom.window.document;
+  const isHidden = (selector) => {
+    const node = document.querySelector(selector);
+    return Boolean(node) && node.classList.contains('mpe-hidden');
+  };
+
+  record('SMCShop：面板换上站点自己的标题与列名',
+    document.querySelector('.mpe-heading h2').textContent === 'SMCShop 利润筛选器'
+      && headerLabels(dom).join(',') === '#,商品,最低卖价,最高收价,单件利润,利润率,商店数',
+    `${document.querySelector('.mpe-heading h2').textContent} | ${headerLabels(dom).join(',')}`);
+
+  record('SMCShop：该站不支持的功能整块藏起来',
+    isHidden('.mpe-segmented') && isHidden('.mpe-anomaly-field') && isHidden('.mpe-version-field')
+      && isHidden('.mpe-scope-field') && isHidden('#mpe-port-manager') && isHidden('#mpe-calculate'),
+    ['.mpe-segmented', '.mpe-anomaly-field', '.mpe-version-field', '.mpe-scope-field', '#mpe-port-manager', '#mpe-calculate']
+      .map((selector) => `${selector}=${isHidden(selector)}`).join(' '));
+
+  // 服务端聚合里已经带了最低卖价和最高收价，所以打开面板就有排行，没有「开始计算」这一步
+  record('SMCShop：打开面板直接出排行，负利润物品被过滤',
+    rowNames(dom).join(',') === '钻石,石头,圆石,深板岩圆石,深板岩圆石台阶',
+    rowNames(dom).join(','));
+
+  record('SMCShop：缓存键带站点后缀，不会把商城那份读成自己的',
+    Object.keys(dom.__store).some((key) => key.endsWith('.smcshop')), Object.keys(dom.__store).join(','));
+
+  typeInto(dom, document.getElementById('mpe-search'), '圆石');
+  await sleep(INPUT_SETTLE_MS);
+  record('SMCShop：搜索筛选照常工作',
+    rowNames(dom).join(',') === '圆石,深板岩圆石,深板岩圆石台阶', rowNames(dom).join(','));
+
+  // 搜「深板岩圆石」时服务端会把「深板岩圆石台阶」也带出来，而且它排在前面，
+  // 所以只有按 data-item 精确相等挑卡片才不会点错
+  clickItemName(dom, '深板岩圆石');
+  await waitFor(() => document.getElementById('details').hidden === false, 'SMCShop 详情打开', 4000);
+  const heading = document.querySelector('#details h2');
+  record('SMCShop：点商品名打开的是精确匹配的那一件，不是模糊匹配的邻居',
+    Boolean(heading) && heading.textContent.trim() === '深板岩圆石', heading ? heading.textContent : 'null');
+  record('SMCShop：跳转后面板自动收起（详情是页面正文，留着的面板会正好挡住它）',
+    panelOpen(dom) === false, `open=${panelOpen(dom)}`);
+  record('SMCShop：状态栏说明面板已收起',
+    statusNote(dom).includes('面板已收起'), statusNote(dom));
+  record('SMCShop：跳转没有报错', errorText(dom) === '', errorText(dom));
+
+  dom.window.close();
+}
+
 (async () => {
   await scenarioFastPath();
   await scenarioSearchPath();
@@ -1047,6 +1185,7 @@ async function scenarioErrorStateResets() {
   await scenarioRetryFailedItems();
   await scenarioScopeLimitedCalculation();
   await scenarioErrorStateResets();
+  await scenarioSmcshopSite();
 
   const failed = results.filter((item) => !item.ok);
   console.log(`\n${results.length - failed.length}/${results.length} 通过`);

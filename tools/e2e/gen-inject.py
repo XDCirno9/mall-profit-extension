@@ -25,11 +25,13 @@ def read(name):
 CSS = read('content.css')
 CORE = read('profit-core.js')
 CONTENT = read('content.js')
+SITES = read('site-adapters.js')
 
 TEMPLATE = r"""(function () {
   var CSS = __CSS__;
   var CORE = __CORE__;
   var CONTENT = __CONTENT__;
+  var SITES = __SITES__;
 
   // In-memory stand-in for chrome.storage.local so nothing is persisted.
   var store = {};
@@ -94,6 +96,7 @@ TEMPLATE = r"""(function () {
     style.textContent = CSS;
     document.head.appendChild(style);
     (0, eval)(CORE);
+    (0, eval)(SITES);
     (0, eval)(CONTENT);
     return document.getElementById('mpe-root') ? 'booted' : 'failed';
   };
@@ -103,7 +106,8 @@ TEMPLATE = r"""(function () {
 output = (TEMPLATE
           .replace('__CSS__', json.dumps(CSS))
           .replace('__CORE__', json.dumps(CORE))
-          .replace('__CONTENT__', json.dumps(CONTENT)))
+          .replace('__CONTENT__', json.dumps(CONTENT))
+          .replace('__SITES__', json.dumps(SITES)))
 
 target = os.path.join(HERE, 'inject.js')
 with io.open(target, 'w', encoding='utf-8', newline='\n') as handle:

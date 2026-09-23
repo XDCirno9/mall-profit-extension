@@ -2,13 +2,15 @@
   'use strict';
 
   const Core = globalThis.MallProfitCore;
-  if (!Core) return;
+  const Sites = globalThis.MallProfitSites;
+  // 按当前域名挑站点适配器。manifest 只匹配这两个站，理论上取不到就说明走错了页面，直接不做。
+  const Site = Sites ? Sites.forLocation(window.location) : null;
+  if (!Core || !Site) return;
 
   const CONFIG = Object.freeze({
-    apiBase: 'https://mall.vesego.xyz/api/mall',
-    pageSize: 100,
     listConcurrency: 8,
     offerConcurrency: 4,
+    offerPageSize: 100,
     cacheTtlMs: 5 * 60 * 1000,
     fetchRetries: 2,
     maxOffers: 20000,
@@ -17,15 +19,19 @@
     mallSearchPlaceholder: '搜索物品名',
     mallItemTableHeader: '物品名',
     highlightMs: 1800,
-    inputDebounceMs: 220,
-    defaultStatusNote: '忽略路程与运输成本 · 自动隐藏标记商店'
+    inputDebounceMs: 220
   });
 
+  const L = Site.labels;
+
+  // 两个站点共用同一个 chrome.storage.local，key 必须分开，否则在 A 站存的缓存会被 B 站当成自己的。
+  // mall 不加后缀：老用户已经有那份缓存了，没必要为这次改版白拉一遍全量数据。
+  const keySuffix = Site.id === 'mall' ? '' : `.${Site.id}`;
   const STORAGE_KEYS = Object.freeze({
-    market: 'mallProfit.market.v1',
-    totals: 'mallProfit.totals.v1',
-    analyses: 'mallProfit.analyses.v1',
-    portBlacklist: 'mallProfit.portBlacklist.v1'
+    market: `mallProfit.market.v1${keySuffix}`,
+    totals: `mallProfit.totals.v1${keySuffix}`,
+    analyses: `mallProfit.analyses.v1${keySuffix}`,
+    portBlacklist: `mallProfit.portBlacklist.v1${keySuffix}`
   });
 
   // 表头定义：field 为空的列（# 序号）不参与排序，其余列点一下表头即可升 / 降序。
@@ -34,17 +40,17 @@
     unit: Object.freeze([
       Object.freeze({ label: '#', field: '' }),
       Object.freeze({ label: '商品', field: 'itemName' }),
-      Object.freeze({ label: '最低出售价', field: 'minSellPrice' }),
-      Object.freeze({ label: '最高收购价', field: 'maxBuyPrice' }),
+      Object.freeze({ label: L.minSell, field: 'minSellPrice' }),
+      Object.freeze({ label: L.maxBuy, field: 'maxBuyPrice' }),
       Object.freeze({ label: '单件利润', field: 'unitProfit' }),
       Object.freeze({ label: '利润率', field: 'profitRate' }),
-      Object.freeze({ label: '在售数量', field: 'sellAmount' })
+      Object.freeze({ label: L.sellAmount, field: 'sellAmount' })
     ]),
     total: Object.freeze([
       Object.freeze({ label: '#', field: '' }),
       Object.freeze({ label: '商品', field: 'itemName' }),
-      Object.freeze({ label: '最低出售价', field: 'minSellPrice' }),
-      Object.freeze({ label: '最高收购价', field: 'maxBuyPrice' }),
+      Object.freeze({ label: L.minSell, field: 'minSellPrice' }),
+      Object.freeze({ label: L.maxBuy, field: 'maxBuyPrice' }),
       Object.freeze({ label: '总利润', field: 'totalProfit' }),
       Object.freeze({ label: '可匹配数量', field: 'matchedQty' }),
       Object.freeze({ label: '单件利润', field: 'unitProfit' }),
@@ -93,7 +99,8 @@
     // 按钮上要显示「重新计算（N 条）」，但 setBusy 会在算报价时被调用上万次，
     // 所以这个数字只在 render 里算一次存下来，setBusy 只读它
     scopeTargetCount: 0,
-    anomalyMultiplier: 10,
+    // 不支持异常过滤的站点必须留在 0：那一支要求每行都有分析结果，否则整张表会一片空白
+    anomalyMultiplier: Site.features.anomalyFilter ? 10 : 0,
     panelOpen: false,
     dataLoading: false,
     offerLoading: false,
@@ -132,6 +139,33 @@
     if (element.value !== value) element.value = value;
   }
 
+  // 站点之间的界面差异集中在这里：换标题文案、把该站不支持的功能整块藏掉。
+  // 灰着的控件比不存在的控件更让人困惑——SMCShop 只做单件利润，
+  // 留一堆点不动的下拉会让人以为面板坏了。
+  function applySiteChrome() {
+    const heading = elements['mpe-panel'].querySelector('.mpe-heading');
+    if (heading) {
+      heading.querySelector('h2').textContent = Site.title;
+      heading.querySelector('p').textContent = Site.tagline;
+    }
+    elements['mpe-status-note'].textContent = L.statusNote;
+    elements['mpe-explainer'].textContent = L.unitRule;
+    const quantityField = elements['mpe-min-sell-amount'].closest('.mpe-field');
+    const quantityLabel = quantityField ? quantityField.querySelector('span') : null;
+    if (quantityLabel) quantityLabel.textContent = L.minSellFilter;
+
+    const features = Site.features;
+    const toggle = (node, supported) => {
+      if (node) node.classList.toggle('mpe-hidden', !supported);
+    };
+    toggle(elements['mpe-panel'].querySelector('.mpe-segmented'), features.totalProfit);
+    toggle(elements['mpe-calculate'], features.manualCalculation);
+    toggle(elements['mpe-calc-scope'].closest('.mpe-field'), features.manualCalculation);
+    toggle(elements['mpe-anomaly-filter'].closest('.mpe-field'), features.anomalyFilter);
+    toggle(elements['mpe-vanilla-filter'].closest('.mpe-field'), features.vanillaFilter);
+    toggle(elements['mpe-port-manager'], features.portBlacklist);
+  }
+
   function createUI() {
     if (document.getElementById('mpe-root')) return;
 
@@ -164,7 +198,7 @@
           </header>
 
           <div class="mpe-status-line">
-            <span id="mpe-data-status">尚未读取商城数据</span>
+            <span id="mpe-data-status">尚未读取物品列表</span>
             <span class="mpe-status-note" id="mpe-status-note" data-notice="false">忽略路程与运输成本 · 自动隐藏标记商店</span>
           </div>
 
@@ -348,6 +382,7 @@
     ];
 
     for (const id of ids) elements[id] = document.getElementById(id);
+    applySiteChrome();
     bindEvents();
     render();
   }
@@ -438,7 +473,7 @@
       if (!button) return;
       event.preventDefault();
       const itemName = button.dataset.mpeItem;
-      if (itemName) void jumpToMallItem(itemName);
+      if (itemName) void jumpToItem(itemName);
     });
 
     for (const button of document.querySelectorAll('.mpe-segment')) {
@@ -647,9 +682,7 @@
     for (const button of document.querySelectorAll('.mpe-segment')) {
       button.classList.toggle('is-active', button.dataset.mode === state.mode);
     }
-    const modeText = state.mode === 'total'
-      ? '总利润会把最低出售报价与最高收购报价按数量匹配，忽略港口和运输成本。'
-      : '单件利润 = 最高收购价 − 最低出售价。只显示大于 0 的商品。';
+    const modeText = state.mode === 'total' ? L.totalRule : L.unitRule;
     const anomalyText = state.anomalyMultiplier > 0
       ? (' 异常报价按同商品中位数的 ' + state.anomalyMultiplier + ' 倍过滤。')
       : '';
@@ -734,7 +767,7 @@
     let lastError = null;
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
-        const response = await fetch(`${CONFIG.apiBase}${path}`, {
+        const response = await fetch(`${Site.apiBase || ''}${path}`, {
           method: 'GET',
           credentials: 'include',
           cache: 'no-store',
@@ -789,46 +822,51 @@
     await Promise.all(Array.from({ length: workerCount }, () => run()));
   }
 
-  function buildItemsPath(offset) {
-    const params = new URLSearchParams({
-      includeTagged: 'false',
-      limit: String(CONFIG.pageSize),
-      offset: String(offset)
-    });
-    return `/items?${params.toString()}`;
-  }
+  // 拉全站物品列表。两个站点的差别只在这里：
+  // - mall 是分页目录（8000+ 商品，按 offset 并发翻页）
+  // - SMCShop 一个请求就把全库聚合成 summaries 返回（item 留空时服务端直接给汇总）
+  async function fetchCatalog(signal) {
+    const catalog = Site.catalog;
 
-  async function fetchMarketItems(signal) {
-    const firstPage = await apiGet(buildItemsPath(0), signal);
-    const firstItems = requireArrayField(firstPage, 'items', '商品列表接口');
-    const reportedTotal = Number(firstPage.total);
+    if (catalog.kind === 'single') {
+      updateProgress('正在读取物品列表', 0, 1);
+      const payload = await apiGet(catalog.path, signal);
+      const list = requireArrayField(payload, catalog.listField, '物品列表接口');
+      return { items: dedupeItems(list.map((entry) => Site.toItem(entry))), total: list.length };
+    }
+
+    const pageSize = catalog.pageSize;
+    const firstPage = await apiGet(catalog.path(0, pageSize), signal);
+    const firstItems = requireArrayField(firstPage, catalog.listField, '物品列表接口');
+    const reportedTotal = Number(firstPage[catalog.totalField]);
     const total = Number.isFinite(reportedTotal) && reportedTotal >= 0 ? reportedTotal : firstItems.length;
 
     const items = [...firstItems];
     const offsets = [];
-    for (let offset = CONFIG.pageSize; offset < total; offset += CONFIG.pageSize) offsets.push(offset);
+    for (let offset = pageSize; offset < total; offset += pageSize) offsets.push(offset);
 
     const totalPages = 1 + offsets.length;
     let completedPages = 1;
-    updateProgress('正在读取商品列表', completedPages, totalPages);
+    updateProgress('正在读取物品列表', completedPages, totalPages);
 
     await mapLimit(offsets, CONFIG.listConcurrency, async (offset) => {
-      const page = await apiGet(buildItemsPath(offset), signal);
-      items.push(...requireArrayField(page, 'items', '商品列表接口'));
+      const page = await apiGet(catalog.path(offset, pageSize), signal);
+      items.push(...requireArrayField(page, catalog.listField, '物品列表接口'));
       completedPages += 1;
-      updateProgress('正在读取商品列表', completedPages, totalPages);
+      updateProgress('正在读取物品列表', completedPages, totalPages);
     }, signal);
 
+    return { items: dedupeItems(items), total };
+  }
+
+  // 按物品名去重，顺便把字段规整成统一形状；同一物品重复出现时以最后一条为准
+  function dedupeItems(rawItems) {
     const deduplicated = new Map();
-    for (const rawItem of items) {
+    for (const rawItem of rawItems) {
       const item = Core.normalizeItem(rawItem);
       if (item) deduplicated.set(item.itemName, item);
     }
-
-    return {
-      items: [...deduplicated.values()],
-      total
-    };
+    return [...deduplicated.values()];
   }
 
   async function loadMarket(force) {
@@ -844,11 +882,11 @@
     state.marketController = new AbortController();
     setBusy();
     render();
-    updateProgress('正在读取商品列表', 0, 1);
+    updateProgress('正在读取物品列表', 0, 1);
 
     try {
       if (force) await clearStoredData();
-      const result = await fetchMarketItems(state.marketController.signal);
+      const result = await fetchCatalog(state.marketController.signal);
       state.items = result.items;
       state.unitRows = Core.buildUnitRows(result.items);
       state.marketSavedAt = Date.now();
@@ -860,7 +898,7 @@
       scheduleHideProgress();
     } catch (error) {
       if (!isAbortError(error)) {
-        state.error = `商城数据读取失败：${error.message || '未知错误'}`;
+        state.error = `物品列表读取失败：${error.message || '未知错误'}`;
       }
       hideProgress();
       render();
@@ -890,13 +928,7 @@
 
     while (offset < total && offers.length < CONFIG.maxOffers && guard < 250) {
       guard += 1;
-      const params = new URLSearchParams({
-        includeTagged: 'false',
-        limit: '100',
-        mode,
-        offset: String(offset)
-      });
-      const page = await apiGet(`/items/${encodeURIComponent(itemName)}/offers?${params.toString()}`, signal);
+      const page = await apiGet(Site.offers.path(itemName, mode, offset, CONFIG.offerPageSize), signal);
       const pageOffers = requireArrayField(page, 'offers', '报价接口');
       const reportedTotal = Number(page.total);
       if (Number.isFinite(reportedTotal) && reportedTotal >= 0) total = reportedTotal;
@@ -1204,6 +1236,14 @@
     }, 500);
   }
 
+  // 当前模式下有没有「需要算」的东西。只做单件利润的站点永远是 false：
+  // 它的价格是服务端聚合好的，打开面板就能看到，不存在计算这一步。
+  function isCalculable() {
+    return state.anomalyMultiplier > 0
+      || state.portBlacklist.length > 0
+      || (state.mode === 'total' && Site.features.totalProfit);
+  }
+
   function calculationNeeded() {
     if (!state.items.length) return true;
     const rows = getUnitRows();
@@ -1244,7 +1284,7 @@
     elements['mpe-refresh'].disabled = busy;
     elements['mpe-refresh'].textContent = state.dataLoading ? '读取中…' : state.offerLoading ? '计算中…' : '刷新数据';
 
-    const calculable = state.anomalyMultiplier > 0 || state.portBlacklist.length > 0 || state.mode === 'total';
+    const calculable = isCalculable();
     elements['mpe-calculate'].disabled = busy || !state.items.length || !calculable;
     // 带上条数：范围可能是「当前筛选结果」这样的一小撮，
     // 只写「开始计算」用户没法预判这一下要发出去多少请求
@@ -1313,8 +1353,9 @@
       };
     }
     const total = state.totalCache[row.itemName];
-    // 单件利润模式下表格里的数字来自商品快照，跟总利润缓存是否过期无关
-    if (!total || state.mode !== 'total') return { ...row };
+    // 单件利润模式下表格里的数字来自商品快照，跟总利润缓存是否过期无关；
+    // 但快照本身也会过期，照样打上 stale，状态栏才能提示「可以刷新一下了」
+    if (!total || state.mode !== 'total') return { ...row, stale: !isFresh(state.marketSavedAt) };
     return {
       ...Core.withTotalProfit(row, total),
       stale: !isFresh(total.updatedAt)
@@ -1522,7 +1563,7 @@
     }, CONFIG.highlightMs);
   }
 
-  async function jumpToMallItem(itemName) {
+  async function jumpToItem(itemName) {
     if (state.jumpBusy || !itemName) return;
 
     state.error = '';
@@ -1530,50 +1571,120 @@
     state.jumpBusy = itemName;
     renderStatus();
 
-    let searchInput = null;
-    let previousSearch = '';
-
     try {
-      // 商城 DOM 可能尚未挂载完成（例如刚刷新页面），先给它一点时间再判定失败
-      if (!(await waitForMallUi(CONFIG.mallUiTimeoutMs))) {
-        throw new Error('当前页面没有商城物品列表，请先打开商城页面再点击物品名');
+      if (Site.jump.kind === 'smcshop') {
+        state.jumpNotice = await jumpInSmcshop(itemName);
+        closePanel();
+        return;
       }
-
-      let row = findMallItemRow(itemName);
-
-      if (!row) {
-        searchInput = findMallSearchInput();
-        if (!searchInput) {
-          throw new Error('没有找到商城的物品搜索框，请确认商城页面已经完全加载');
-        }
-        previousSearch = searchInput.value;
-        const alreadySearched = previousSearch.trim() === itemName;
-        if (!alreadySearched) setNativeInputValue(searchInput, itemName);
-        row = await waitForMallItemRow(itemName, alreadySearched ? 600 : CONFIG.jumpTimeoutMs);
-      }
-
-      if (!row) {
-        // 商城搜索会整表重挂，原先抓到的 input 节点可能已脱离文档，回滚前重新定位一次
-        const restoreInput = findMallSearchInput() || searchInput;
-        if (restoreInput && previousSearch !== restoreInput.value) {
-          setNativeInputValue(restoreInput, previousSearch);
-        }
-        throw new Error(`商城列表中没有找到「${itemName}」，可能已下架，或商城正被港口筛选限制`);
-      }
-
-      const calculationRunning = state.offerLoading;
-      // 面板不关闭、也不收窄：商城自己的物品详情会显示在面板之上，
-      // 关掉详情后原样回到排行，后台计算也不会被打断
-      activateMallRow(row, itemName);
-      state.jumpNotice = calculationRunning
-        ? `已打开「${itemName}」详情，面板保持打开，后台计算仍在继续。`
-        : `已打开「${itemName}」详情，面板保持打开，关掉详情即可继续看排行。`;
+      state.jumpNotice = await jumpInMall(itemName);
     } catch (error) {
       state.error = `跳转失败：${error.message || '未知错误'}`;
     } finally {
       state.jumpBusy = '';
       render();
     }
+  }
+
+  // mall：面板不关闭、也不收窄，商城自己的物品详情会显示在面板之上
+  async function jumpInMall(itemName) {
+    // 商城 DOM 可能尚未挂载完成（例如刚刷新页面），先给它一点时间再判定失败
+    if (!(await waitForMallUi(CONFIG.mallUiTimeoutMs))) {
+      throw new Error('当前页面没有商城物品列表，请先打开商城页面再点击物品名');
+    }
+
+    let searchInput = null;
+    let previousSearch = '';
+    let row = findMallItemRow(itemName);
+
+    if (!row) {
+      searchInput = findMallSearchInput();
+      if (!searchInput) {
+        throw new Error('没有找到商城的物品搜索框，请确认商城页面已经完全加载');
+      }
+      previousSearch = searchInput.value;
+      const alreadySearched = previousSearch.trim() === itemName;
+      if (!alreadySearched) setNativeInputValue(searchInput, itemName);
+      row = await waitForMallItemRow(itemName, alreadySearched ? 600 : CONFIG.jumpTimeoutMs);
+    }
+
+    if (!row) {
+      // 商城搜索会整表重挂，原先抓到的 input 节点可能已脱离文档，回滚前重新定位一次
+      const restoreInput = findMallSearchInput() || searchInput;
+      if (restoreInput && previousSearch !== restoreInput.value) {
+        setNativeInputValue(restoreInput, previousSearch);
+      }
+      throw new Error(`商城列表中没有找到「${itemName}」，可能已下架，或商城正被港口筛选限制`);
+    }
+
+    const calculationRunning = state.offerLoading;
+    activateMallRow(row, itemName);
+    return calculationRunning
+      ? `已打开「${itemName}」详情，面板保持打开，后台计算仍在继续。`
+      : `已打开「${itemName}」详情，面板保持打开，关掉详情即可继续看排行。`;
+  }
+
+  // SMCShop：把物品名填进它的查询框，再点对应的那张卡片。详情是页面正文（#details 顶掉 #results），
+  // 不是浮层，所以面板得让位收起，否则正好挡在详情上面。
+  async function jumpInSmcshop(itemName) {
+    const form = document.querySelector(Site.jump.searchForm);
+    const input = document.querySelector(Site.jump.searchInput);
+    if (!form || !input) {
+      throw new Error('当前页面没有商店查询表单，请先打开商店查询页');
+    }
+
+    setNativeInputValue(input, itemName);
+    if (typeof form.requestSubmit === 'function') form.requestSubmit();
+    else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+    const card = await pollUntil(() => findSmcshopCard(itemName), CONFIG.jumpTimeoutMs);
+    if (!card) {
+      throw new Error(`商店列表中没有找到「${itemName}」，可能还没有被任何客户端收录`);
+    }
+    card.click();
+
+    const opened = await pollUntil(() => isSmcshopDetailOpen(itemName), CONFIG.jumpTimeoutMs);
+    if (!opened) {
+      throw new Error(`打开「${itemName}」的商店详情超时，请重试`);
+    }
+    return `已打开「${itemName}」的商店详情，面板已收起；重新点「利润排行」即可回到榜单。`;
+  }
+
+  // 服务端搜索是模糊匹配，卡片必须按 data-item 精确相等来挑，
+  // 否则点「圆石」会命中排在它前面的「深板岩圆石」
+  function findSmcshopCard(itemName) {
+    const cards = document.querySelectorAll(`${Site.jump.results} ${Site.jump.card}[data-item]`);
+    for (const card of cards) {
+      if (card.dataset.item === itemName) return card;
+    }
+    return null;
+  }
+
+  function isSmcshopDetailOpen(itemName) {
+    const details = document.querySelector(Site.jump.details);
+    if (!details || details.hidden) return false;
+    const heading = details.querySelector('h2');
+    return Boolean(heading) && heading.textContent.trim() === itemName;
+  }
+
+  // 轮询等待。搜索和详情都是异步渲染的，而且整块会被替换掉，所以每次都要重新查节点
+  function pollUntil(read, timeoutMs, intervalMs = 120) {
+    return new Promise((resolve) => {
+      const deadline = Date.now() + timeoutMs;
+      const tick = () => {
+        const value = read();
+        if (value) {
+          resolve(value);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          resolve(null);
+          return;
+        }
+        window.setTimeout(tick, intervalMs);
+      };
+      tick();
+    });
   }
 
   function render() {
@@ -1601,18 +1712,18 @@
   function renderStatus(rows = []) {
     const count = state.unitRows.length;
     if (state.dataLoading) {
-      elements['mpe-data-status'].textContent = '正在读取商城数据…';
+      elements['mpe-data-status'].textContent = '正在读取物品列表…';
     } else if (state.items.length) {
-      elements['mpe-data-status'].textContent = `已读取 ${integerFormatter.format(state.items.length)} 个商品 · 更新于 ${formatTime(state.marketSavedAt)}`;
+      elements['mpe-data-status'].textContent = `已读取 ${integerFormatter.format(state.items.length)} 个物品 · 更新于 ${formatTime(state.marketSavedAt)}`;
     } else {
-      elements['mpe-data-status'].textContent = '尚未读取商城数据';
+      elements['mpe-data-status'].textContent = '尚未读取物品列表';
     }
     elements['mpe-badge'].hidden = count <= 0;
     elements['mpe-badge'].textContent = count > 999 ? '999+' : String(count);
     elements['mpe-port-count'].textContent = String(state.portBlacklist.length);
 
     if (elements['mpe-status-note']) {
-      let note = CONFIG.defaultStatusNote;
+      let note = L.statusNote;
       let notice = false;
       if (state.jumpBusy) {
         note = `正在商城列表中定位「${state.jumpBusy}」…`;
@@ -1631,12 +1742,14 @@
         const staleCount = rows.filter((row) => row.stale).length;
         if (staleCount > 0) {
           const ttlMinutes = Math.round(CONFIG.cacheTtlMs / 60000);
-          note = `${integerFormatter.format(staleCount)} 个商品的报价已超过 ${ttlMinutes} 分钟有效期，点击「重新计算」可刷新。`;
+          // 没有计算这一步的站点只能靠「刷新数据」重新拉，提示里得说对按钮名
+          const action = isCalculable() ? '点击「重新计算」可刷新' : '点击「刷新数据」可更新';
+          note = `${integerFormatter.format(staleCount)} 个物品的数据已超过 ${ttlMinutes} 分钟有效期，${action}。`;
           notice = true;
         } else if (state.calcScope === 'filtered') {
           // 计算范围是常驻设置不是临时提醒，所以拼在常规说明前面但不打高亮标记。
           // 切回「全部商品」后这条会消失，而表里可能仍然只有上一轮算过的那部分结果。
-          note = `计算范围：当前筛选结果（${integerFormatter.format(state.scopeTargetCount)} 条） · ${CONFIG.defaultStatusNote}`;
+          note = `计算范围：当前筛选结果（${integerFormatter.format(state.scopeTargetCount)} 条） · ${L.statusNote}`;
         }
       }
       elements['mpe-status-note'].textContent = note;
@@ -1679,14 +1792,14 @@
       elements['mpe-tbody'].innerHTML = '';
       elements['mpe-empty'].hidden = false;
       elements['mpe-empty'].textContent = state.dataLoading
-        ? '正在读取商城数据…'
+        ? '正在读取物品列表…'
         : state.offerLoading && state.anomalyMultiplier > 0
           ? '正在过滤异常报价…'
           : (state.anomalyMultiplier > 0 || state.portBlacklist.length > 0) && calculationNeeded()
             ? '已启用异常过滤，请点击开始计算。'
             : state.items.length
               ? '没有符合当前条件的正利润商品'
-              : '打开面板后将自动读取商城数据';
+              : '打开面板后将自动读取物品列表';
       elements['mpe-row-count'].textContent = '';
       return;
     }
@@ -1776,7 +1889,7 @@
   function noteStorageFailure(label, error) {
     const message = String((error && error.message) || '');
     state.storageWarning = /quota|exceed/i.test(message)
-      ? '本地缓存空间不足，已跳过缓存写入；重开面板会重新读取商城数据。'
+      ? '本地缓存空间不足，已跳过缓存写入；重开面板会重新读取物品列表。'
       : `本地缓存写入失败（${label}），结果只保留在当前页面。`;
     console.warn('[Mall Profit] 缓存写入失败', label, error);
   }
