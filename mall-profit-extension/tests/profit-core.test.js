@@ -211,6 +211,78 @@ assert.equal(Core.withinPriceRatio(5, -1, 10), true);
 assert.equal(Core.withinPriceRatio(5, Number.NaN, 10), true);
 assert.equal(Core.withinPriceRatio(null, 5, 10), true);
 
+// 库存核对：SMCShop 的挂单可以「标了价但没有货」（amount 为 0），
+// 服务端聚合出的最低卖价经常就是这些空挂单的价，所以只在有货的挂单里取极值。
+// 下面这几条用的是实测抓到的原值：破碎王冠摘要 10000（那条挂单 amount=0）→ 有货其实要 80000，
+// 而最高收价只有 66666，也就是说这件物品按有货价算是负利润。
+const crown = Core.resolveInStockPrices([
+  { item: '破碎王冠', type: 'SELL', price: 10000, amount: 0 },
+  { item: '破碎王冠', type: 'SELL', price: 80000, amount: 1 },
+  { item: '破碎王冠', type: 'SELL', price: 84500, amount: 0 },
+  { item: '破碎王冠', type: 'BUY', price: 66666, amount: 54 }
+], '破碎王冠', { cap: 200 });
+assert.equal(crown.minSellPrice, 80000);
+assert.equal(crown.maxBuyPrice, 66666);
+assert.equal(crown.sellCount, 1);
+assert.equal(crown.buyCount, 1);
+assert.equal(crown.outOfStockCount, 2);
+assert.equal(crown.truncated, false);
+assert.equal(crown.unknownShape, false);
+
+// 卖单全是空挂单 ⇒ 买不到（发酵桶实测就是这样：2 条卖单 amount 都是 0）
+const barrel = Core.resolveInStockPrices([
+  { item: '发酵桶', type: 'SELL', price: 15000, amount: 0 },
+  { item: '发酵桶', type: 'SELL', price: 31000, amount: 0 },
+  { item: '发酵桶', type: 'BUY', price: 30000, amount: 128 }
+], '发酵桶', { cap: 200 });
+assert.equal(barrel.minSellPrice, null);
+assert.equal(barrel.maxBuyPrice, 30000);
+assert.equal(barrel.outOfStockCount, 2);
+
+// 服务端是 LIKE 模糊匹配：查「圆石」会带回「深板岩圆石」，必须按 item 精确相等筛
+const fuzzy = Core.resolveInStockPrices([
+  { item: '深板岩圆石', type: 'SELL', price: 0.01, amount: 999 },
+  { item: '圆石', type: 'SELL', price: 0.5, amount: 100 },
+  { item: '圆石台阶', type: 'BUY', price: 9, amount: 999 }
+], '圆石', { cap: 200 });
+assert.equal(fuzzy.minSellPrice, 0.5);
+assert.equal(fuzzy.maxBuyPrice, null);
+assert.equal(fuzzy.sellCount, 1);
+assert.equal(fuzzy.buyCount, 0);
+
+// 一次最多返回 cap 条。达到上限时数组里可能整段缺一类挂单
+// （实测查「圆石」200 条全是卖单，买单一条都没有），这时不能断定「没人收」
+const capped = Core.resolveInStockPrices(
+  Array.from({ length: 200 }, (_, index) => ({ item: '圆石', type: 'SELL', price: 0.01 * index, amount: 1 })),
+  '圆石',
+  { cap: 200 }
+);
+assert.equal(capped.truncated, true);
+assert.equal(capped.maxBuyPrice, null);
+
+// 有精确匹配的行却一条都没有 amount 字段 ⇒ 接口形状变了，
+// 不能把「读不到库存」当成「全都没货」（那样整张表会凭空变空）
+const shape = Core.resolveInStockPrices([
+  { item: '钻石', type: 'SELL', price: 40 },
+  { item: '钻石', type: 'BUY', price: 90 }
+], '钻石', { cap: 200 });
+assert.equal(shape.unknownShape, true);
+assert.equal(shape.missingAmount, 2);
+// 只有一部分行缺字段时不算形状异常（按缺货处理，保守）
+const partial = Core.resolveInStockPrices([
+  { item: '钻石', type: 'SELL', price: 40 },
+  { item: '钻石', type: 'SELL', price: 45, amount: 3 }
+], '钻石', { cap: 200 });
+assert.equal(partial.unknownShape, false);
+assert.equal(partial.minSellPrice, 45);
+
+// 空数组、非数组、没匹配上时都不能抛错，交回 null 让调用方处理
+assert.deepEqual(Core.resolveInStockPrices([], '石头', { cap: 200 }).minSellPrice, null);
+assert.equal(Core.resolveInStockPrices(null, '石头', { cap: 200 }).truncated, false);
+assert.equal(Core.resolveInStockPrices([{ item: '沙子', type: 'SELL', price: 3, amount: 1 }], '石头').sellCount, 0);
+// 没给 cap 就不判截断
+assert.equal(Core.resolveInStockPrices([{ item: '石头', type: 'SELL', price: 1, amount: 1 }], '石头').truncated, false);
+
 console.log('profit-core tests passed');
 
 

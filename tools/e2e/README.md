@@ -22,7 +22,7 @@ npm i -D jsdom          # once; jsdom is intentionally not a project dependency
 node tools/e2e/jsdom-harness.js
 ```
 
-Prints `PASS`/`FAIL` per assertion and `n/94 通过` at the end. Covers:
+Prints `PASS`/`FAIL` per assertion and `n/105 通过` at the end. Covers:
 
 - fast path: row already rendered, search box untouched, panel stays open on top of
   the mall detail, and the mall dialog is still a `body`-level child;
@@ -73,8 +73,21 @@ Prints `PASS`/`FAIL` per assertion and `n/94 通过` at the end. Covers:
 - price-ratio cap: hidden on the mall site (its quotes are real market data, so a large
   buy/sell ratio is normal there), and on SMCShop it drops exactly the rows whose extremes
   are player junk. The fixture pairs realistic spreads with two real-world samples
-  (`成书` 1 → 125000, `骨头` 1 → 99999); setting the cap to "off" brings them back and the
-  toggle must fire **no request at all**, because the verdict comes from the loaded snapshot;
+  (`成书` 1 → 125000, `骨头` 1 → 99999); setting the cap to "off" brings `成书` back, and
+  widening it must only top up the rows that just entered scope — the cap's own verdict
+  still comes from the loaded snapshot, so widening it cannot re-fetch the whole board;
+- stock check (SMCShop only): the summaries aggregate `minSellPrice` / `maxBuyPrice` over
+  every listing, including the ones whose `amount` is 0, so a cheap placeholder can make an
+  item look profitable. The fixture carries the real cases: `破碎王冠` (summary 10000, the
+  in-stock price is 80000, buy side 66666 ⇒ negative), `园丁灌水器` (50000 → 70000 in stock,
+  profit 30000 → 10000), `发酵桶` (every sell listing empty ⇒ unbuyable), `青金石` (every buy
+  listing empty ⇒ nobody to sell to) and `海砂` (200 listings, i.e. the server's cap, so the
+  verdict must fall back to the summary instead of calling it out of stock). Asserts: the
+  affected rows disappear, the surviving numbers are the in-stock ones, the explainer counts
+  both kinds of hiding, already-checked items are never re-requested, narrowing by search
+  does not re-fetch, and the mall site never fires this request kind at all. `石头`'s summary
+  sell price comes from an empty listing in the fixture, so the table must show 1.2 / 2.3
+  rather than 1 / 2.5 — the point is that the two price columns really were replaced;
 - SMCShop: on a second host the panel swaps in that site's title and column names, hides
   every feature the site cannot support (rather than greying them out), shows the ranking
   as soon as it opens because the server pre-aggregates min-sell/max-buy, and keeps its
@@ -302,6 +315,8 @@ differ visibly, and 100 items (38 rows) is plenty.
 ### 2.8 Run the SMCShop driver
 
 ```bash
+agent-browser close --all          # required: a live session keeps the OLD init script
+python tools/e2e/gen-inject.py
 agent-browser open https://shop.whalemc.com/ --init-script tools/e2e/inject.js
 agent-browser set viewport 1600 900
 agent-browser wait 8000
@@ -314,6 +329,10 @@ agent-browser eval 'window.__MPE_CONTINUE = true; "go"'
 agent-browser eval 'JSON.stringify(window.__R)'
 ```
 
+The driver opens the panel, waits for the ranking, then waits for the automatic stock
+check to finish (the explainer's item count has to stop moving and the progress bar has
+to fold away) before it measures anything.
+
 This one runs against the second marketplace for real, so it also covers what jsdom cannot:
 the real ~6MB summary payload (currently ~60,000 items), the real `#search-form` / `#results`
 markup, and whether the injected `eval` survives that site's CSP.
@@ -321,9 +340,13 @@ markup, and whether the injected `eval` survives that site's CSP.
 | Field | Observed |
 | --- | --- |
 | `title` / `headerLabels` | `SMCShop 利润筛选器` / `#,商品,最低卖价,最高收价,单件利润,利润率,商店数` |
+| `firstPaintMs` / `stockMs` | ~1.2s for the summary ranking / ~14s for 305 stock checks at concurrency 3 |
+| `rowsBeforeStockCheck` / `rowCountAfterStock` | `306` → `207` |
+| `stockChecked` / `stockRequests` | `305` / `305` — one request per item |
+| `stockHidden` / `stockUncertain` | `98` out of stock or negative after in-stock prices / `7` over the 200-listing cap |
+| `topRows` after the check | starts at `超频芯片 5,999 → 10,000 = 4,001`; `破碎王冠` (56,666 unverified) is gone |
 | `rowCount` / `rowsWithoutRatio` | `306` with the 10× cap on, `388` with it off |
 | `ratioHiddenCount` / `removedByRatio` | `82` / `成书,骨头,合金装备原胚,虚空远征激光枪-老鼠,高级火箭靴强化芯片,世界鲨鱼的零食,红木椅子,悲灾骸颅` |
-| `noisyGoneWithRatio` / `noisyBackWithoutRatio` | both empty / both present — the cap hides them and only the cap does |
 | `dataStatus` | `已读取 59,945 个物品` |
 | `hiddenControls` | all six unsupported controls |
 | `jumpTarget` vs `detailHeading` | identical — the detail that opened is the item that was clicked |
@@ -332,6 +355,11 @@ markup, and whether the injected `eval` survives that site's CSP.
 
 ## Gotchas that cost time
 
+- **Always `agent-browser close --all` before a driver run.** The session keeps the
+  `--init-script` it was opened with, so opening the same site again in a live session
+  silently re-runs the **stale** `inject.js` — you end up testing the previous build and
+  every symptom looks like a bug in the new code (a whole feature simply never fires,
+  no request, no error). `gen-inject.py` rewriting the file is not enough.
 - **`inject.js` only defines hooks — it does not inject anything by itself.** Every
   driver must call `window.__mpeBoot()` as its first step (it returns `'booted'`,
   `'already'`, `'failed'` or `'no-boot-hook'`). Skip it and the page simply has no

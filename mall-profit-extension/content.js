@@ -10,6 +10,9 @@
   const CONFIG = Object.freeze({
     listConcurrency: 8,
     offerConcurrency: 4,
+    // 核对挂单库存是一个物品一个请求，SMCShop 按当前筛选结果大约几百条，
+    // 并发开小一点，别把站点打疼
+    stockConcurrency: 3,
     offerPageSize: 100,
     cacheTtlMs: 5 * 60 * 1000,
     fetchRetries: 2,
@@ -31,6 +34,8 @@
     market: `mallProfit.market.v1${keySuffix}`,
     totals: `mallProfit.totals.v1${keySuffix}`,
     analyses: `mallProfit.analyses.v1${keySuffix}`,
+    // 挂单库存的核对结果，跟商品快照绑在一起：快照换了它就必须作废
+    stocks: `mallProfit.stocks.v1${keySuffix}`,
     portBlacklist: `mallProfit.portBlacklist.v1${keySuffix}`
   });
 
@@ -76,6 +81,16 @@
     unitRows: [],
     totalCache: {},
     analysisCache: {},
+    // 逐物品核对过的「有货报价」：{ [商品名]: { status, minSellPrice, maxBuyPrice, ... } }
+    stockCache: {},
+    stockLoading: false,
+    stockController: null,
+    stockRunId: 0,
+    // 用户按过「停止核对」：在下次刷新数据之前不再自动开始
+    stockStopped: false,
+    // 核对失败的商品（接口报错）。记下来就不在一轮里反复重试，
+    // 否则自动核对会被「render → 又发现它没结果 → 再请求」这个循环带着跑
+    stockErrors: new Set(),
     portBlacklist: [],
     availablePorts: [],
     draftPortBlacklist: new Set(),
@@ -107,6 +122,12 @@
     priceRatioLimit: Site.features.priceRatioFilter ? 10 : 0,
     // 被倍率上限筛掉的行数，渲染说明文字时用
     priceRatioHiddenCount: 0,
+    // 库存核对这一类：核对过的、判定缺货（或价差为负）被藏起来的、以及挂单过多核不准的
+    stockCheckedCount: 0,
+    stockExcludedCount: 0,
+    stockUncertainCount: 0,
+    // 接口连 amount 字段都不给了（形状变了），这时候不能把「读不到库存」当成「全都没货」
+    stockShapeWarning: false,
     panelOpen: false,
     dataLoading: false,
     offerLoading: false,
@@ -723,7 +744,18 @@
     const blockedText = state.portBlacklist.length > 0
       ? (' 已屏蔽 ' + state.portBlacklist.length + ' 个港口的报价。')
       : '';
-    elements['mpe-explainer'].textContent = modeText + anomalyText + ratioText + blockedText;
+    // 库存核对的结果要报出来：这张排行榜的「最低卖价」默认是全站极值，
+    // 里面混着大量标了价却没有货的挂单，不说明白用户会以为物品被吞了
+    const stockText = Site.features.stockVerification && state.stockCheckedCount > 0
+      ? (' 已按挂单库存核对 ' + integerFormatter.format(state.stockCheckedCount) + ' 个物品'
+        + (state.stockExcludedCount > 0
+          ? '，隐藏 ' + integerFormatter.format(state.stockExcludedCount) + ' 个缺货或价差为负的。'
+          : '。')
+        + (state.stockUncertainCount > 0
+          ? (' 另有 ' + integerFormatter.format(state.stockUncertainCount) + ' 个物品挂单超过 200 条，没能逐条核对。')
+          : ''))
+      : '';
+    elements['mpe-explainer'].textContent = modeText + anomalyText + ratioText + blockedText + stockText;
   }
 
   function getTableColumns() {
@@ -913,6 +945,10 @@
     state.dataLoading = true;
     state.error = '';
     state.offerErrors.clear();
+    // 换了商品快照，上一份挂单核对的结论就全作废了；正在跑的那轮也一起停掉
+    cancelStockVerification();
+    state.stockErrors.clear();
+    state.stockStopped = false;
     state.marketController = new AbortController();
     setBusy();
     render();
@@ -926,6 +962,7 @@
       state.marketSavedAt = Date.now();
       state.totalCache = {};
       state.analysisCache = {};
+      state.stockCache = {};
       await clearAnalysisStorage();
       await persistMarket();
       render();
@@ -1042,6 +1079,121 @@
   function hasFreshAnalysis(cache, itemName) {
     const entry = cache[itemName];
     return Boolean(entry && isFresh(entry.updatedAt));
+  }
+
+  // 库存核对的缓存：跟异常分析一样按「有没有新鲜结果」判断，过期就重新核对
+  function hasFreshStock(itemName) {
+    const entry = state.stockCache[itemName];
+    return Boolean(entry && isFresh(entry.updatedAt));
+  }
+
+  // 核对一个物品到底有没有货：拉它的挂单明细，只在 amount > 0 的挂单里取极值。
+  // 一个请求就够——不带 type 时服务端会把 SELL 和 BUY 一起返回（实测过）。
+  async function fetchItemStock(row, signal) {
+    const payload = await apiGet(Site.stock.path(row.itemName), signal);
+    const listings = requireArrayField(payload, Site.stock.listField, '挂单接口');
+    const prices = Core.resolveInStockPrices(listings, row.itemName, { cap: Site.stock.cap });
+    const updatedAt = Date.now();
+    const counts = { sellCount: prices.sellCount, buyCount: prices.buyCount };
+
+    // 接口不再返回库存字段：读不到库存不等于没货，显式报出来并按「核不准」处理
+    if (prices.unknownShape) {
+      state.stockShapeWarning = true;
+      return { status: 'uncertain', updatedAt };
+    }
+    // 一次最多返回 cap 条。截断时数组里可能整段缺一类挂单（实测查「圆石」200 条全是卖单），
+    // 而且返回顺序不保证按价格，所以不能断定没货——退回聚合值，宁可留着虚高也不凭空误杀。
+    if (prices.truncated) return { status: 'uncertain', updatedAt };
+
+    // 有货的卖单或收单缺一边，就是买不到或卖不掉；两头都有但价差不是正数，同样没得赚
+    const { minSellPrice, maxBuyPrice } = prices;
+    if (minSellPrice === null || maxBuyPrice === null || !(maxBuyPrice - minSellPrice > 0)) {
+      return { status: 'excluded', updatedAt, ...counts };
+    }
+    return { status: 'ok', minSellPrice, maxBuyPrice, updatedAt, ...counts };
+  }
+
+  // 自动核对挂单库存。范围就是「当前筛选结果」：先按搜索 / 最少商店数 / 版本筛，
+  // 再把倍率已经判掉的行剔出去——成书那种 125000 倍的物品不值得再为它发请求，
+  // 所以搜「锭」可能只剩十几条要核。
+  // 由 render() 收口触发（带防抖），而不是散在各个事件里：任何改动的落点最后都要 render，
+  // 挂在一处就不会漏；重复触发由 stockLoading 挡住。
+  const stockDebouncedVerify = debounce(() => void verifyStock(), CONFIG.inputDebounceMs);
+
+  function scheduleStockVerification() {
+    if (!Site.features.stockVerification || !state.panelOpen) return;
+    // 「停止核对」按下去之后就别再自动开始了，否则一 render 又从头拉一遍
+    if (state.stockStopped) return;
+    if (state.dataLoading || state.stockLoading || !state.items.length) return;
+    stockDebouncedVerify();
+  }
+
+  // 已经核对过的行不再进待办，所以中途改筛选、再改回来都不会重复请求
+  function getStockTargets() {
+    return getFilteredRows().filter((row) => (
+      !row.stockExcluded
+      && withinPriceRatio(row)
+      && !hasFreshStock(row.itemName)
+      && !state.stockErrors.has(row.itemName)
+    ));
+  }
+
+  async function verifyStock() {
+    if (!Site.features.stockVerification || state.stockLoading || state.dataLoading) return;
+    if (!state.items.length) return;
+
+    const targets = getStockTargets();
+    // 没有待办就直接返回，别顺手 render：render 末尾又会安排下一次核对，
+    // 空待办还重绘一次就会变成「每 220 毫秒重绘一次」的死循环
+    if (!targets.length) return;
+
+    const runId = state.stockRunId + 1;
+    state.stockRunId = runId;
+    state.stockLoading = true;
+    const controller = new AbortController();
+    state.stockController = controller;
+    let completed = 0;
+    let writesSincePersist = 0;
+    setBusy();
+    updateProgress('正在核对挂单库存', 0, targets.length);
+
+    try {
+      await mapLimit(targets, CONFIG.stockConcurrency, async (row) => {
+        try {
+          state.stockCache[row.itemName] = await fetchItemStock(row, controller.signal);
+          writesSincePersist += 1;
+          if (writesSincePersist >= 10) {
+            writesSincePersist = 0;
+            await persistStockCache();
+          }
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          state.stockErrors.add(row.itemName);
+        } finally {
+          completed += 1;
+          if (runId === state.stockRunId) {
+            updateProgress('正在核对挂单库存', completed, targets.length);
+            // 每隔一小批重绘一次，缺货的行是逐批消失的，不用等三百条全核完
+            if (completed % 12 === 0) render();
+          }
+        }
+      }, controller.signal);
+
+      await persistStockCache();
+      hideProgress();
+    } catch (error) {
+      if (!isAbortError(error)) {
+        state.error = `挂单库存核对失败：${error.message || '未知错误'}`;
+      }
+      if (runId === state.stockRunId) hideProgress();
+    } finally {
+      if (runId === state.stockRunId) {
+        state.stockLoading = false;
+        state.stockController = null;
+        setBusy();
+        render();
+      }
+    }
   }
 
   async function ensureAnomalyAnalysis(force, retryOnly = false) {
@@ -1233,11 +1385,24 @@
     }
   }
 
+  // 停掉正在跑的那一轮库存核对。abort 之后 mapLimit 会把 AbortError 抛回来，
+  // verifyStock 的 catch 认得出它，不会当成「这几个物品核对失败」记一笔。
+  function cancelStockVerification() {
+    if (state.stockController) state.stockController.abort();
+    state.stockRunId += 1;
+    state.stockLoading = false;
+    state.stockController = null;
+  }
+
   function cancelOfferCalculation(renderAfter = true) {
     if (state.offerController) state.offerController.abort();
     state.offerRunId += 1;
     state.offerLoading = false;
     state.offerController = null;
+    // 「停止计算」也要能停掉挂单库存核对：它不算是计算，但一样是几百个请求。
+    // 停下来之后在下次刷新数据之前不再自动开始，否则一 render 又从头拉一遍。
+    cancelStockVerification();
+    if (Site.features.stockVerification) state.stockStopped = true;
     hideProgress();
     setBusy();
     if (renderAfter) render();
@@ -1253,7 +1418,7 @@
     elements['mpe-progress-text'].textContent = label;
     elements['mpe-progress-count'].textContent = safeTotal > 0 ? `${integerFormatter.format(safeCurrent)} / ${integerFormatter.format(safeTotal)}` : '';
     elements['mpe-progress-bar'].style.width = `${percent}%`;
-    elements['mpe-cancel'].hidden = !state.offerLoading;
+    elements['mpe-cancel'].hidden = !(state.offerLoading || state.stockLoading);
     setBusy();
   }
 
@@ -1266,7 +1431,7 @@
 
   function scheduleHideProgress() {
     window.setTimeout(() => {
-      if (!state.dataLoading && !state.offerLoading) hideProgress();
+      if (!state.dataLoading && !state.offerLoading && !state.stockLoading) hideProgress();
     }, 500);
   }
 
@@ -1314,9 +1479,18 @@
   }
   function setBusy() {
     if (!elements['mpe-refresh']) return;
-    const busy = state.dataLoading || state.offerLoading;
+    // 挂单库存核对也是「正在占着网络」，按钮得一起锁住，但文案要分得清是在干什么
+    const verifying = state.stockLoading && !state.offerLoading;
+    const busy = state.dataLoading || state.offerLoading || state.stockLoading;
     elements['mpe-refresh'].disabled = busy;
-    elements['mpe-refresh'].textContent = state.dataLoading ? '读取中…' : state.offerLoading ? '计算中…' : '刷新数据';
+    elements['mpe-refresh'].textContent = state.dataLoading
+      ? '读取中…'
+      : verifying
+        ? '核对中…'
+        : state.offerLoading
+          ? '计算中…'
+          : '刷新数据';
+    elements['mpe-cancel'].textContent = verifying ? '停止核对' : '停止计算';
 
     const calculable = isCalculable();
     elements['mpe-calculate'].disabled = busy || !state.items.length || !calculable;
@@ -1341,13 +1515,14 @@
     elements['mpe-retry'].textContent = `重试失败项（${integerFormatter.format(failed)}）`;
   }
 
-  // 「看什么」的筛选条件只留这一份：搜索、最低在售数量、商品版本、价格倍率。
+  // 「看什么」的筛选条件只留这一份：搜索、最低在售数量、商品版本。
   // 抽出来是因为「只计算当前筛选结果」得在分析缓存还空着的时候先筛一遍商品快照——
-  // 那会儿 getVisibleRows() 里绝大多数行还没有结果会被判成不可见，筛出来是 0 条。
+  // 那会儿表格里绝大多数行还没有结果会被判成不可见，筛出来是 0 条。
+  // 倍率上限与库存核对不写在这里：它们是「这一行该不该显示」的判据，走 isRowVisible，
+  // 因为说明文字要分别报出这两类各隐藏了多少条。
   function matchesFilter(row, search) {
     if (search && !row.itemName.toLocaleLowerCase('zh-CN').includes(search)) return false;
     if (row.sellAmount < state.minSellAmount) return false;
-    if (!withinPriceRatio(row)) return false;
     const isVanilla = Boolean(row.vanillaId);
     if (state.vanillaFilter === 'vanilla' && !isVanilla) return false;
     if (state.vanillaFilter === 'non-vanilla' && isVanilla) return false;
@@ -1358,15 +1533,23 @@
     return Core.withinPriceRatio(row.maxBuyPrice, row.minSellPrice, state.priceRatioLimit);
   }
 
+  // 过了「看什么」之后，这一行还该不该出现。缺货（买了没货 / 没人收）和倍率超上限都在这儿挡掉，
+  // 表格和「隐藏了几条」的计数共用这一个判据。
+  function isRowVisible(row) {
+    if (row.stockExcluded) return false;
+    return withinPriceRatio(row);
+  }
+
   function currentSearchKeyword() {
     return state.search.trim().toLocaleLowerCase('zh-CN');
   }
 
-  // 把分析 / 总利润缓存合并进商品快照行，表格和计算范围共用这一份数字。
+  // 把分析 / 总利润 / 库存核对的结果合并进商品快照行，表格和计算范围共用这一份数字。
   // 两边各算一套的话，「最低在售数量」会在表格里按「剔除异常报价后的数量」筛、
   // 在计算范围里按商城原始快照筛，于是出现「表里只剩 3 行、按钮却写要算 37 条」。
-  // strict=true（表格）丢掉「还没算过」和「被异常规则判定排除」的行；
-  // strict=false（计算范围）保留它们——点计算的时候缓存本来就是空的，全丢掉就没东西可算了。
+  // strict=true（表格）丢掉「还没算过」「被异常规则判定排除」「核对后发现缺货」的行；
+  // strict=false 保留它们——点计算的时候缓存本来就是空的，全丢掉就没东西可算了，
+  // 说明文字也得靠它数出「共隐藏了几条」。
   function mergeRow(row, cache, strict) {
     if (state.anomalyMultiplier > 0 || state.portBlacklist.length > 0) {
       const analysis = cache[row.itemName];
@@ -1391,6 +1574,32 @@
         stale: !isFresh(analysis.updatedAt)
       };
     }
+
+    // 库存核对的结果在这里生效：两个价格换成「有货的极值」，利润跟着重算。
+    // 缺货的行标记出来而不是直接丢，strict=false 那份要靠它统计隐藏条数。
+    const stock = Site.features.stockVerification ? state.stockCache[row.itemName] : null;
+    if (stock) {
+      if (stock.status === 'excluded') {
+        return strict ? null : { ...row, stockExcluded: true };
+      }
+      if (stock.status === 'ok') {
+        const unitProfit = stock.maxBuyPrice - stock.minSellPrice;
+        return {
+          ...row,
+          minSellPrice: stock.minSellPrice,
+          maxBuyPrice: stock.maxBuyPrice,
+          sellOfferCount: stock.sellCount,
+          buyOfferCount: stock.buyCount,
+          unitProfit,
+          profitRate: (unitProfit / stock.minSellPrice) * 100,
+          stockVerified: true,
+          stale: !isFresh(stock.updatedAt)
+        };
+      }
+      // uncertain：挂单超过上限被截断（或接口不再返回库存字段），核不准，保留聚合值
+      return { ...row, stockUncertain: true, stale: !isFresh(state.marketSavedAt) };
+    }
+
     const total = state.totalCache[row.itemName];
     // 单件利润模式下表格里的数字来自商品快照，跟总利润缓存是否过期无关；
     // 但快照本身也会过期，照样打上 stale，状态栏才能提示「可以刷新一下了」
@@ -1401,29 +1610,30 @@
     };
   }
 
-  // 计算范围要算的行：默认全部正利润商品，选「当前筛选结果」就是筛选出来的全部行。
-  // 不能改回 getVisibleRows()：计算前分析缓存是空的，strict 会把绝大多数行判成不可见。
-  function getScopeTargets() {
-    if (state.calcScope !== 'filtered') return state.unitRows;
-    return getScopeRows();
-  }
-
-  function getScopeRows() {
+  // 过了「看什么」的全部行。
+  // strict=true 是表格那份：还没算过、被异常规则判掉、核对后发现缺货的行都不在里面；
+  // strict=false 保留它们，因为说明文字的计数、以及「当前筛选结果」这个计算范围都要用它
+  // （点计算时缓存本来就是空的，全丢掉就没东西可算了）。
+  function getFilteredRows(strict = false) {
     const search = currentSearchKeyword();
     const cache = getCurrentAnalysisCache();
     return state.unitRows
-      .map((row) => mergeRow(row, cache, false))
+      .map((row) => mergeRow(row, cache, strict))
       .filter((row) => Boolean(row) && matchesFilter(row, search));
   }
 
-  function getVisibleRows() {
-    const search = currentSearchKeyword();
-    const cache = getCurrentAnalysisCache();
-    const rows = state.unitRows
-      .map((row) => mergeRow(row, cache, true))
-      .filter((row) => Boolean(row) && matchesFilter(row, search));
+  // 计算范围要算的行：默认全部正利润商品，选「当前筛选结果」就是表格里显示的那些（未排序）
+  function getScopeTargets(filtered) {
+    if (state.calcScope !== 'filtered') return state.unitRows;
+    return getScopeRows(filtered || getFilteredRows());
+  }
 
-    return Core.sortRows(rows, state.sortKey);
+  function getScopeRows(filtered) {
+    return filtered.filter(isRowVisible);
+  }
+
+  function getVisibleRows() {
+    return Core.sortRows(getScopeRows(getFilteredRows(true)), state.sortKey);
   }
 
   function escapeHtml(value) {
@@ -1728,16 +1938,15 @@
 
   function render() {
     if (!elements['mpe-tbody']) return;
-    // 可见行的计算是一次全表 map + filter + sort，一次渲染只算一次，摘要和表格共用结果，
-    // 不要把 getVisibleRows() 分别写进两个子渲染里
-    const rows = getVisibleRows();
+    // 「显示什么」在这里一次算清：可见行与两类隐藏计数共用同一份 filtered，
+    // 否则会出现「表里只剩 7 行、说明却写隐藏了 82 个」这种两边对不上的情况
+    const filtered = getFilteredRows();
     // 「开始计算（N 条）」里的 N 在这里算一次存进 state：setBusy 在算报价时会被调上万次，只读它
-    state.scopeTargetCount = getScopeTargets().length;
-    // 说明文字要报出被倍率上限筛掉几条，这里顺带数一遍。
-    // unitRows 本来就只剩正利润行（SMCShop 实测 388 行），这点开销可以忽略
-    state.priceRatioHiddenCount = state.priceRatioLimit > 0
-      ? state.unitRows.reduce((count, row) => count + (withinPriceRatio(row) ? 0 : 1), 0)
-      : 0;
+    state.scopeTargetCount = getScopeTargets(filtered).length;
+    countHiddenRows(filtered);
+    // 表格用的是 strict 那份（丢掉还没算过的行），可见行的排序一次渲染只做一次，
+    // 摘要和表格共用结果，不要把排序分别写进两个子渲染里
+    const rows = Core.sortRows(getScopeRows(getFilteredRows(true)), state.sortKey);
     renderMode();
     renderStatus(rows);
     renderSummary(rows);
@@ -1751,6 +1960,31 @@
     elements['mpe-price-ratio-filter'].value = String(state.priceRatioLimit);
     elements['mpe-calc-scope'].value = state.calcScope;
     setBusy();
+    // 库存核对收口在这里触发（内部自带防抖与重复检查）：打开面板、改搜索、改数量、改倍率
+    // 最后都会走到 render，挂在一处就不会漏，也不必在每个事件里各写一遍
+    scheduleStockVerification();
+  }
+
+  // 说明文字要报出两类各隐藏了多少条。两类互斥地数，加起来正好是「筛出来但没显示」的条数：
+  // 缺货（买了没货 / 没人收）和被核对改低到没利润的行归第一类，只是倍率超上限的归第二类。
+  function countHiddenRows(filtered) {
+    let excluded = 0;
+    let ratioHidden = 0;
+    let checked = 0;
+    let uncertain = 0;
+    for (const row of filtered) {
+      if (row.stockVerified || row.stockExcluded || row.stockUncertain) checked += 1;
+      if (row.stockExcluded) {
+        excluded += 1;
+        continue;
+      }
+      if (row.stockUncertain) uncertain += 1;
+      if (!withinPriceRatio(row)) ratioHidden += 1;
+    }
+    state.stockCheckedCount = checked;
+    state.stockExcludedCount = excluded;
+    state.stockUncertainCount = uncertain;
+    state.priceRatioHiddenCount = ratioHidden;
   }
 
   // rows 可以不传：跳转时只想立刻把「正在定位…」刷出来，不需要顺手统计过期条数
@@ -1776,8 +2010,18 @@
       } else if (state.storageWarning) {
         note = state.storageWarning;
         notice = true;
+      } else if (state.stockShapeWarning) {
+        // 读不到库存就不敢判「没货」，只能退回聚合值——这属于参数异常，必须说出来
+        note = '挂单接口没有返回库存字段，已跳过缺货核对，价格按聚合值显示。';
+        notice = true;
       } else if (state.jumpNotice) {
         note = state.jumpNotice;
+        notice = true;
+      } else if (state.stockStopped) {
+        note = '已停止核对挂单库存，缺失的结果按聚合值显示；点「刷新数据」可重新核对。';
+        notice = true;
+      } else if (state.stockErrors.size > 0) {
+        note = `${integerFormatter.format(state.stockErrors.size)} 个物品的挂单库存核对失败，点「刷新数据」可重试。`;
         notice = true;
       } else if (state.truncatedCount > 0) {
         note = `有 ${integerFormatter.format(state.truncatedCount)} 个商品的报价超过上限被截断，其总利润可能偏小。`;
@@ -1890,6 +2134,7 @@
         STORAGE_KEYS.market,
         STORAGE_KEYS.totals,
         STORAGE_KEYS.analyses,
+        STORAGE_KEYS.stocks,
         STORAGE_KEYS.portBlacklist
       ]);
 
@@ -1898,6 +2143,18 @@
         state.items = market.items.map(Core.normalizeItem).filter(Boolean);
         state.unitRows = Core.buildUnitRows(state.items);
         state.marketSavedAt = market.savedAt;
+      }
+
+      // 挂单库存的结论只对同一份商品快照有效：savedAt 对不上就整份作废，
+      // 否则会拿上一批挂单的核对结果去判这一批数据
+      const stocks = stored[STORAGE_KEYS.stocks];
+      if (stocks && stocks.savedAt === state.marketSavedAt
+        && stocks.entries && typeof stocks.entries === 'object') {
+        const entries = {};
+        for (const [itemName, entry] of Object.entries(stocks.entries)) {
+          if (entry && Number.isFinite(entry.updatedAt)) entries[itemName] = entry;
+        }
+        state.stockCache = entries;
       }
 
       state.portBlacklist = normalizePortNames(stored[STORAGE_KEYS.portBlacklist] || []);
@@ -1989,6 +2246,20 @@
     }
   }
 
+  async function persistStockCache() {
+    try {
+      await chrome.storage.local.set({
+        [STORAGE_KEYS.stocks]: {
+          savedAt: state.marketSavedAt,
+          entries: state.stockCache
+        }
+      });
+      state.storageWarning = '';
+    } catch (error) {
+      noteStorageFailure('库存核对缓存', error);
+    }
+  }
+
   async function clearAnalysisStorage() {
     try {
       await chrome.storage.local.remove(STORAGE_KEYS.analyses);
@@ -1998,7 +2269,12 @@
   }
   async function clearStoredData() {
     try {
-      await chrome.storage.local.remove([STORAGE_KEYS.market, STORAGE_KEYS.totals, STORAGE_KEYS.analyses]);
+      await chrome.storage.local.remove([
+        STORAGE_KEYS.market,
+        STORAGE_KEYS.totals,
+        STORAGE_KEYS.analyses,
+        STORAGE_KEYS.stocks
+      ]);
     } catch (error) {
       console.warn('[Mall Profit] 清理缓存失败', error);
     }

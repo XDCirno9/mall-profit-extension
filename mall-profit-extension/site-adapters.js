@@ -48,6 +48,9 @@
       // 商城的报价是服务端给出的真实行情，倍率大是正常的（便宜材料差价就是大），
       // 这个判据只对 SMCShop 那种聚合极值的数据源有意义
       priceRatioFilter: false,
+      // 商城接口里的 amount 全是有货的数量（实测石头/钻石/破碎王冠等报价 amount 都 ≥1），
+      // 0 库存的物品压根进不了表，所以没有「空挂单污染极值」这个问题，不必多花 8000 多次请求
+      stockVerification: false,
       portBlacklist: true,
       vanillaFilter: true,
       manualCalculation: true
@@ -100,6 +103,16 @@
       card: 'button.item-card',
       details: '#details'
     }),
+    // 核对「到底有没有货」用的明细接口。不带 type 时一次把 SELL / BUY 都带回来（实测过），
+    // 所以核对一个物品只要一个请求。cap 是服务端一次最多返回的条数，达到了就说明被截断。
+    stock: Object.freeze({
+      path(itemName) {
+        const params = new URLSearchParams({ item: itemName, limit: '5000' });
+        return `/api/shops?${params.toString()}`;
+      },
+      listField: 'shops',
+      cap: 200
+    }),
     // 明细接口一次最多 200 条且是模糊匹配（查「圆石」会被「深板岩圆石」占满名额），
     // 所以依赖逐物品取明细的总利润 / 异常过滤 / 港口黑名单在这里都算不准，直接不提供。
     // 数据里也没有 vanillaId，版本筛选无从判断。
@@ -111,6 +124,10 @@
       // 而真实行商物品的收价/卖价倍率都在 10 倍以内，所以按倍率上限把噪声整行筛掉。
       // 这个判据只用 summaries 现成的字段，不需要额外请求，是开面板就生效的。
       priceRatioFilter: true,
+      // 倍率只能挡掉最离谱的那批。真正的大头是「标了价但库存为 0」的空挂单——
+      // 摘要里的最低卖价经常就是它们的价（破碎王冠 10000 无货 vs 有货 80000），
+      // 逐个物品查明细、只在有货挂单里取极值才能识别出来，所以这个开关要发请求。
+      stockVerification: true,
       portBlacklist: false,
       vanillaFilter: false,
       manualCalculation: false

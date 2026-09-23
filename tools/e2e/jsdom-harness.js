@@ -55,13 +55,72 @@ const SMC_SUMMARIES = [
   { item: '深板岩圆石', count: 300, minSellPrice: 0.7, maxBuyPrice: 1.8 },
   { item: '黄铁矿', count: 50, minSellPrice: 3, maxBuyPrice: 1 },
   { item: '成书', count: 41, minSellPrice: 1, maxBuyPrice: 125000 },
-  { item: '骨头', count: 50, minSellPrice: 1, maxBuyPrice: 99999 }
+  { item: '骨头', count: 50, minSellPrice: 1, maxBuyPrice: 99999 },
+  // 以下五个是「挂单库存核对」要处理的，数字全部按实测抓到的原值抄：
+  //   破碎王冠 摘要最低卖价 10000 是条空挂单，有货要 80000，收价才 66666 ⇒ 实际负利润
+  //   园丁灌水器 摘要 50000 也是空挂单，有货 70000 ⇒ 利润从 30000 掉到 10000
+  //   发酵桶 两条卖单库存都是 0 ⇒ 压根买不到
+  //   青金石 卖单有货、买单两条库存都是 0 ⇒ 没人收
+  //   海砂 挂单条数超过服务端一次能返回的 200 条 ⇒ 核不准，只能退回聚合值
+  { item: '破碎王冠', count: 37, minSellPrice: 10000, maxBuyPrice: 66666 },
+  { item: '园丁灌水器', count: 19, minSellPrice: 50000, maxBuyPrice: 80000 },
+  { item: '发酵桶', count: 4, minSellPrice: 15000, maxBuyPrice: 30000 },
+  { item: '青金石', count: 30, minSellPrice: 2, maxBuyPrice: 3 },
+  { item: '海砂', count: 240, minSellPrice: 0.5, maxBuyPrice: 5 }
 ];
 
-// 倍率上限默认 10 倍时应该被隐藏的那两个（成书 125000×、骨头 99999×）
+// 带 item 查询时服务端返回的挂单明细。amount 为 0 = 标了价但没有货。
+// 服务端是 LIKE 模糊匹配，所以这里也按「名字包含查询词」来配，邻居会被一起带出来。
+const SMC_LISTINGS = [
+  { item: '钻石', type: 'SELL', price: 40, amount: 5 },
+  { item: '钻石', type: 'SELL', price: 35, amount: 0 },
+  { item: '钻石', type: 'BUY', price: 90, amount: 3 },
+  { item: '石头', type: 'SELL', price: 1.2, amount: 2614 },
+  { item: '石头', type: 'SELL', price: 1, amount: 0 },
+  { item: '石头', type: 'BUY', price: 3.5, amount: 100 },
+  { item: '圆石', type: 'SELL', price: 0.5, amount: 100 },
+  { item: '圆石', type: 'BUY', price: 2, amount: 50 },
+  { item: '深板岩圆石', type: 'SELL', price: 0.7, amount: 10 },
+  { item: '深板岩圆石', type: 'BUY', price: 1.8, amount: 10 },
+  { item: '深板岩圆石台阶', type: 'SELL', price: 0.6, amount: 10 },
+  { item: '深板岩圆石台阶', type: 'BUY', price: 1, amount: 10 },
+  { item: '黄铁矿', type: 'SELL', price: 3, amount: 1 },
+  { item: '黄铁矿', type: 'BUY', price: 1, amount: 1 },
+  { item: '成书', type: 'SELL', price: 1, amount: 3 },
+  { item: '成书', type: 'BUY', price: 125000, amount: 1 },
+  { item: '骨头', type: 'SELL', price: 1, amount: 153 },
+  { item: '骨头', type: 'BUY', price: 99999, amount: 0 },
+  { item: '破碎王冠', type: 'SELL', price: 10000, amount: 0 },
+  { item: '破碎王冠', type: 'SELL', price: 80000, amount: 1 },
+  { item: '破碎王冠', type: 'SELL', price: 84500, amount: 0 },
+  { item: '破碎王冠', type: 'BUY', price: 66666, amount: 54 },
+  { item: '园丁灌水器', type: 'SELL', price: 50000, amount: 0 },
+  { item: '园丁灌水器', type: 'SELL', price: 58888, amount: 0 },
+  { item: '园丁灌水器', type: 'SELL', price: 70000, amount: 2 },
+  { item: '园丁灌水器', type: 'BUY', price: 80000, amount: 10 },
+  { item: '发酵桶', type: 'SELL', price: 15000, amount: 0 },
+  { item: '发酵桶', type: 'SELL', price: 31000, amount: 0 },
+  { item: '发酵桶', type: 'BUY', price: 30000, amount: 128 },
+  { item: '青金石', type: 'SELL', price: 2, amount: 50 },
+  { item: '青金石', type: 'BUY', price: 3, amount: 0 },
+  { item: '青金石', type: 'BUY', price: 2.5, amount: 0 },
+  // 海砂：正好 200 条，踩到服务端的上限，插件必须据此判断「核不准」而不是「没货」
+  ...Array.from({ length: 199 }, (_, index) => ({ item: '海砂', type: 'SELL', price: 0.5 + index * 0.01, amount: 1 })),
+  { item: '海砂', type: 'BUY', price: 5, amount: 20 }
+];
+
+// 倍率上限默认 10 倍时应该被隐藏的那两个（成书 125000×、骨头 99999×）。
+// 它们连库存核对都不该触发——先筛再核对，已经判掉的行不值得再为它发请求
 const SMC_NOISY_ITEMS = ['成书', '骨头'];
 
-// 跟 content.js 的 CONFIG.maxScopeLimit 对齐，作为条数上限的契约写进断言
+// 库存核对会被判定成「缺货 / 价差为负」而隐藏的三个
+const SMC_OUT_OF_STOCK_ITEMS = ['破碎王冠', '发酵桶', '青金石'];
+
+// 核不准（挂单超过服务端一次返回的条数）的那个：保留聚合值显示
+const SMC_UNCERTAIN_ITEM = '海砂';
+
+// 核对完仍留在榜上的行，按单件利润降序
+const SMC_EXPECTED_ROWS = ['园丁灌水器', '钻石', '海砂', '石头', '圆石', '深板岩圆石', '深板岩圆石台阶'];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -285,8 +344,17 @@ async function createExtensionDom(url, options = {}) {
       if (target.pathname !== '/api/shops') throw new Error(`未预期的请求 ${requestPath}`);
       const query = target.searchParams.get('item') || '';
       const matched = (options.smcshop || []).filter((entry) => !query || entry.item.includes(query));
-      // 真服务端 item 留空时只回 summaries（全库聚合），带 item 时回 shops 明细
-      payload = { shops: [], summaries: matched, total: 30909, matched: matched.length };
+      // 真服务端 item 留空时只回 summaries（全库聚合），带 item 时回 shops 明细——
+      // 而且是 LIKE 模糊匹配，所以这里也按「名字包含查询词」把邻居一起带出来
+      const listings = query
+        ? (options.smcListings || []).filter((entry) => entry.item.includes(query))
+        : [];
+      payload = {
+        shops: listings,
+        summaries: matched,
+        total: 30909,
+        matched: matched.length
+      };
     } else if (target.pathname === '/api/mall/items') {
       const limit = Number(target.searchParams.get('limit') || 100);
       const offset = Number(target.searchParams.get('offset') || 0);
@@ -433,6 +501,42 @@ function rowNames(dom) {
     .map((node) => node.dataset.mpeItem);
 }
 
+// 挂单库存核对是自动跑的，断言前要等它把结果落进本地缓存。
+// 传 expectCount 表示「一共有多少个物品核完」——核完最后一个才会整体持久化一次，
+// 所以按条数等是稳的，不用猜时间。
+async function waitForStockCheck(dom, expectCount) {
+  await waitFor(() => {
+    const stored = dom.__store['mallProfit.stocks.v1.smcshop'];
+    return Boolean(stored && stored.entries && Object.keys(stored.entries).length >= expectCount);
+  }, `SMCShop 挂单库存核对完成（${expectCount} 个）`, 8000);
+  await sleep(INPUT_SETTLE_MS);
+}
+
+// 库存核对请求碰过哪些物品。路径里的中文是百分号编码的，要解码后再比对；
+// 「item=」留空的那次是全库 summaries，不属于核对请求，所以要求等号后至少有一个字符。
+function requestedStockItems(dom) {
+  const names = new Set();
+  for (const requestPath of dom.__requests) {
+    const matched = requestPath.match(/\/api\/shops\?item=([^&]+)/);
+    if (matched) names.add(decodeURIComponent(matched[1]));
+  }
+  return names;
+}
+
+function stockRequestCount(dom) {
+  return dom.__requests.filter((requestPath) => /\/api\/shops\?item=[^&]/.test(requestPath)).length;
+}
+
+// 表里某一行的单元格文本，用来断言「显示的到底是摘要值还是核对过的有货价」
+function rowCells(dom, itemName) {
+  const rows = [...dom.window.document.querySelectorAll('#mpe-tbody tr')];
+  const row = rows.find((tr) => {
+    const link = tr.querySelector('button[data-mpe-item]');
+    return Boolean(link) && link.dataset.mpeItem === itemName;
+  });
+  return row ? [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim()) : null;
+}
+
 function headerLabels(dom) {
   return [...dom.window.document.querySelectorAll('#mpe-thead th')]
     .map((th) => th.textContent.replace(/[⇅▲▼]/g, '').trim());
@@ -545,12 +649,17 @@ async function scenarioFastPath() {
     statusNote(dom).includes('面板保持打开'), statusNote(dom));
   record('快路径：商城详情显示该物品',
     mall.detail.textContent.includes('石头'), mall.detail.textContent);
-  // 商城的报价是服务端给出的真实行情，便宜材料差价本来就大，倍率判据在这里只会误杀
+  // 商城的报价是服务端给出的真实行情，便宜材料差价本来就大，倍率判据在这里只会误杀；
+  // 库存核对同理：它的 amount 全是有货的数量，0 库存的物品压根进不了表，不值得为它多发 8000 多个请求
   const ratioField = dom.window.document.querySelector('.mpe-price-ratio-field');
   record('价格倍率上限：商城站点整块隐藏，说明文字里也不出现',
     Boolean(ratioField) && ratioField.classList.contains('mpe-hidden')
       && !dom.window.document.getElementById('mpe-explainer').textContent.includes('最高收价超过最低卖价'),
     ratioField ? `class="${ratioField.className}"` : 'null');
+  record('挂单库存核对：商城站点不发这类请求，说明文字里也不出现',
+    stockRequestCount(dom) === 0
+      && !dom.window.document.getElementById('mpe-explainer').textContent.includes('挂单库存'),
+    `核对请求=${stockRequestCount(dom)}`);
   dom.window.close();
 }
 
@@ -1129,7 +1238,10 @@ async function scenarioErrorStateResets() {
 
 // SMCShop 适配（v1.11.0）：同一个扩展换到另一个商城，只做单件利润排行
 async function scenarioSmcshopSite() {
-  const dom = await createExtensionDom('https://shop.whalemc.com/', { smcshop: SMC_SUMMARIES });
+  const dom = await createExtensionDom('https://shop.whalemc.com/', {
+    smcshop: SMC_SUMMARIES,
+    smcListings: SMC_LISTINGS
+  });
   buildSmcshopDom(dom, SMC_SUMMARIES);
   await openPanelOnly(dom);
   const document = dom.window.document;
@@ -1149,45 +1261,107 @@ async function scenarioSmcshopSite() {
     ['.mpe-segmented', '.mpe-anomaly-field', '.mpe-version-field', '.mpe-scope-field', '#mpe-port-manager', '#mpe-calculate']
       .map((selector) => `${selector}=${isHidden(selector)}`).join(' '));
 
-  // 服务端聚合里已经带了最低卖价和最高收价，所以打开面板就有排行，没有「开始计算」这一步
+  // 服务端聚合里已经带了最低卖价和最高收价，所以打开面板就有排行，没有「开始计算」这一步。
+  // v1.13.0 起面板会自动按当前筛选结果去核对「到底有没有货」，断言前等它跑完
+  await waitForStockCheck(dom, 10);
   record('SMCShop：打开面板直接出排行，负利润物品被过滤',
-    rowNames(dom).join(',') === '钻石,石头,圆石,深板岩圆石,深板岩圆石台阶',
+    rowNames(dom).join(',') === SMC_EXPECTED_ROWS.join(','),
     rowNames(dom).join(','));
 
   // 倍率上限默认 10 倍。它拦的正是「卖价 1 元占位 + 收价乱标」的挂单——
-  // 这类物品的极值差虚高到几十万，不管的话会直接顶到排行榜最前面
-  const keptNames = rowNames(dom);
-  record('SMCShop：倍率超上限的乱标价物品被隐藏',
-    SMC_NOISY_ITEMS.every((name) => !keptNames.includes(name)) && keptNames.length === 5,
-    keptNames.join(','));
+  // 这类物品的极值差虚高到几十万，不管的话会直接顶到排行榜最前面。
+  // 而且它们连库存核对都不该触发：先筛再核对，已经判掉的行不值得为它发请求。
+  record('SMCShop：倍率超上限的乱标价物品被隐藏，也不为它们请求明细',
+    SMC_NOISY_ITEMS.every((name) => !rowNames(dom).includes(name))
+      && SMC_NOISY_ITEMS.every((name) => !requestedStockItems(dom).has(name)),
+    `显示=${rowNames(dom).join(',')} 请求过=${[...requestedStockItems(dom)].join(',')}`);
 
-  record('SMCShop：说明文字报出被隐藏了几个物品',
-    document.getElementById('mpe-explainer').textContent.includes('最高收价超过最低卖价 10 倍')
-      && document.getElementById('mpe-explainer').textContent.includes('2 个'),
-    document.getElementById('mpe-explainer').textContent);
+  const explainer = () => document.getElementById('mpe-explainer').textContent;
+  record('SMCShop：说明文字报出倍率隐藏了几个物品',
+    explainer().includes('最高收价超过最低卖价 10 倍的物品已隐藏（2 个）'), explainer());
 
-  // 判据全部来自商品快照（summaries 现成的字段），所以调档位只重绘表格，一个请求都不该发
-  const requestsBeforeRatio = dom.__requests.length;
+  // 库存核对：摘要里的最低卖价 / 最高收价都是全站极值，里面混着大量「标了价但库存为 0」的挂单。
+  // 这三件按有货价算根本做不成生意，必须整行隐藏
+  record('SMCShop：缺货 / 价差为负的物品被隐藏，且确实去核对了它们',
+    SMC_OUT_OF_STOCK_ITEMS.every((name) => !rowNames(dom).includes(name))
+      && SMC_OUT_OF_STOCK_ITEMS.every((name) => requestedStockItems(dom).has(name)),
+    `隐藏=${SMC_OUT_OF_STOCK_ITEMS.join(',')} 请求过=${[...requestedStockItems(dom)].join(',')}`);
+
+  record('SMCShop：说明文字报出按库存隐藏了几个物品',
+    explainer().includes('已按挂单库存核对 10 个物品')
+      && explainer().includes('隐藏 3 个缺货或价差为负的'),
+    explainer());
+
+  // 石头：摘要里的最低卖价 1 来自一条库存为 0 的挂单，有货最低其实是 1.2 ⇒ 利润从 2.5 降到 2.3
+  const stoneCells = rowCells(dom, '石头');
+  record('SMCShop：最低卖价换成有货价后，利润跟着重算',
+    Boolean(stoneCells) && stoneCells[2] === '1.2' && stoneCells[3] === '3.5' && stoneCells[4] === '2.3',
+    stoneCells ? stoneCells.join(' | ') : 'null');
+
+  // 园丁灌水器：50000 那条没货，有货要 70000，利润从 30000 掉到 10000，仍然是正利润留在榜上
+  const gardenerCells = rowCells(dom, '园丁灌水器');
+  record('SMCShop：核对后仍为正利润的行留在榜上，数字用的是有货价',
+    Boolean(gardenerCells) && gardenerCells[2] === '70,000' && gardenerCells[4] === '10,000',
+    gardenerCells ? gardenerCells.join(' | ') : 'null');
+
+  // 海砂的挂单正好踩到服务端一次返回 200 条的上限，响应里可能整段缺一类挂单
+  // （实测查「圆石」就是 200 条全卖单），所以不能断定没货，只能退回聚合值并说明
+  record('SMCShop：挂单超过上限的物品退回聚合值显示，并说明没能逐条核对',
+    rowNames(dom).includes(SMC_UNCERTAIN_ITEM)
+      && explainer().includes('另有 1 个物品挂单超过 200 条，没能逐条核对'),
+    `${rowNames(dom).includes(SMC_UNCERTAIN_ITEM)} | ${explainer()}`);
+
+  // 核过的物品不会再请求一遍：点表头换排序会整表重绘，但明细不该再拉
+  const stockRequestsBefore = stockRequestCount(dom);
+  clickHeader(dom, '商品');
+  await sleep(INPUT_SETTLE_MS);
+  clickHeader(dom, '单件利润');
+  await sleep(INPUT_SETTLE_MS);
+  record('SMCShop：已核对过的物品不再重复请求（换排序只重绘）',
+    stockRequestCount(dom) === stockRequestsBefore
+      && rowNames(dom).join(',') === SMC_EXPECTED_ROWS.join(','),
+    `${stockRequestsBefore} → ${stockRequestCount(dom)} | ${rowNames(dom).join(',')}`);
+
+  // 调档位本身只重绘表格；但调宽之后新进范围的行要补核对——只补它们，不是重拉一遍。
+  // 成书、骨头就是这一批：它们本来被倍率挡着，一放开就进了核对范围
+  const requestsBeforeRatio = stockRequestCount(dom);
   const ratioSelect = document.getElementById('mpe-price-ratio-filter');
   ratioSelect.value = '0';
   ratioSelect.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
   await sleep(INPUT_SETTLE_MS);
-  record('SMCShop：倍率调成「关闭过滤」后这些物品原样回来，且没发请求',
-    SMC_NOISY_ITEMS.every((name) => rowNames(dom).includes(name))
-      && dom.__requests.length === requestsBeforeRatio,
-    `${rowNames(dom).join(',')} 新增请求=${dom.__requests.length - requestsBeforeRatio}`);
+  record('SMCShop：倍率调宽后被挡住的物品立刻回来（先按聚合值显示）',
+    rowNames(dom).includes('成书'), rowNames(dom).join(','));
+
+  await waitForStockCheck(dom, 12);
+  const afterRatioRequests = stockRequestCount(dom);
+  record('SMCShop：新进范围的行被补核对，只补这两个，不是重拉一遍',
+    afterRatioRequests - requestsBeforeRatio === SMC_NOISY_ITEMS.length,
+    `新增核对请求 ${afterRatioRequests - requestsBeforeRatio} 个`);
+  // 骨头：卖单有货，但那条 99999 的买单库存是 0 ⇒ 没人真收，核对后被判掉
+  record('SMCShop：补核对后发现没有真实买家的物品照样被隐藏',
+    rowNames(dom).includes('成书') && !rowNames(dom).includes('骨头'),
+    rowNames(dom).join(','));
 
   ratioSelect.value = '10';
   ratioSelect.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
   await sleep(INPUT_SETTLE_MS);
+  const restoredRequests = stockRequestCount(dom);
+  record('SMCShop：倍率调回上限后回到核对过的榜单，且没有新增请求',
+    rowNames(dom).join(',') === SMC_EXPECTED_ROWS.join(',')
+      && restoredRequests === afterRatioRequests,
+    `${rowNames(dom).join(',')} | ${afterRatioRequests} → ${restoredRequests}`);
 
   record('SMCShop：缓存键带站点后缀，不会把商城那份读成自己的',
     Object.keys(dom.__store).some((key) => key.endsWith('.smcshop')), Object.keys(dom.__store).join(','));
 
+  // 搜索会把范围压窄，核对只针对剩下的这些——这就是「先筛再核对」
   typeInto(dom, document.getElementById('mpe-search'), '圆石');
   await sleep(INPUT_SETTLE_MS);
+  const searchRequests = stockRequestCount(dom);
   record('SMCShop：搜索筛选照常工作',
     rowNames(dom).join(',') === '圆石,深板岩圆石,深板岩圆石台阶', rowNames(dom).join(','));
+  record('SMCShop：压窄范围后不重复核对已经在缓存里的物品',
+    searchRequests === restoredRequests, `${restoredRequests} → ${searchRequests}`);
 
   // 搜「深板岩圆石」时服务端会把「深板岩圆石台阶」也带出来，而且它排在前面，
   // 所以只有按 data-item 精确相等挑卡片才不会点错

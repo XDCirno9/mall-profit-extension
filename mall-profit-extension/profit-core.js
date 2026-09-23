@@ -25,6 +25,62 @@
     return buy / sell <= cap;
   }
 
+  // 从某个物品的挂单明细里算出「真的有货」的两个极值价。
+  //
+  // SMCShop 的挂单允许「标了价但库存为 0」，服务端聚合 summaries 时把这些空挂单一起算进去了，
+  // 于是聚合出来的最低卖价常常是空挂单的价。实测：破碎王冠摘要 10000，而那条挂单 amount=0，
+  // 真要有货最低得 80000——收价才 66666，实际是负利润；发酵桶更是所有卖单都无货。
+  // 所以判据是「只在 amount > 0 的挂单里取极值」，两边都要看，缺任何一边就买不到或卖不掉。
+  //
+  // 两个必须交给调用方处理的边界：
+  //   1. 服务端是 LIKE 模糊匹配（查「圆石」会带回「深板岩圆石」），必须按 item 精确相等筛；
+  //   2. 一次最多返回 cap 条。截断时数组里可能整段缺一类挂单（实测查「圆石」200 条全是卖单），
+  //      而且返回顺序并不保证按价格，所以截断时不能断定「没货」。
+  function resolveInStockPrices(listings, itemName, options) {
+    const rows = Array.isArray(listings) ? listings : [];
+    const cap = toFiniteNumber(options && options.cap);
+    const name = String(itemName ?? '');
+    const result = {
+      minSellPrice: null,
+      maxBuyPrice: null,
+      sellCount: 0,
+      buyCount: 0,
+      outOfStockCount: 0,
+      missingAmount: 0,
+      truncated: cap !== null && rows.length >= cap,
+      unknownShape: false
+    };
+    let exactRows = 0;
+
+    for (const row of rows) {
+      if (!row || String(row.item ?? '') !== name) continue;
+      const price = toPositiveNumber(row.price);
+      if (price === null) continue;
+      exactRows += 1;
+
+      const amount = 'amount' in row ? toPositiveNumber(row.amount) : null;
+      if (amount === null) {
+        // 0 或负数是「标了价但没有货」；连字段都没有则是接口形状变了，两种要分开记
+        if ('amount' in row) result.outOfStockCount += 1;
+        else result.missingAmount += 1;
+        continue;
+      }
+
+      const type = String(row.type || '').toUpperCase();
+      if (type === 'SELL') {
+        result.sellCount += 1;
+        if (result.minSellPrice === null || price < result.minSellPrice) result.minSellPrice = price;
+      } else if (type === 'BUY') {
+        result.buyCount += 1;
+        if (result.maxBuyPrice === null || price > result.maxBuyPrice) result.maxBuyPrice = price;
+      }
+    }
+
+    // 有精确匹配的行、却一条都没有 amount 字段 ⇒ 读不到库存，不能把「读不到」当成「全都没货」
+    result.unknownShape = result.missingAmount > 0 && result.missingAmount === exactRows;
+    return result;
+  }
+
   function normalizeItem(item) {
     if (!item || typeof item !== 'object') return null;
     const itemName = String(item.itemName || '').trim();
@@ -359,6 +415,7 @@
   global.MallProfitCore = Object.freeze({
     normalizeItem,
     withinPriceRatio,
+    resolveInStockPrices,
     buildUnitRows,
     median,
     parsePortBlacklistText,
